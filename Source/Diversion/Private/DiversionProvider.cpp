@@ -16,7 +16,14 @@
 #include "ScopedSourceControlProgress.h"
 #include "Interfaces/IPluginManager.h"
 #include "DiversionOperations.h"
-#include "DiversionOperations.h"
+#include "DiversionConstants.h"
+#include "CustomWidgets/DiversionPotentialClashUI.h"
+#include "ContentBrowserModule.h"
+#include "PackageTools.h"
+#include "DirectoryWatcherModule.h"
+#include "Modules/ModuleManager.h"
+#include "UObject/ObjectSaveContext.h"
+
 
 #define LOCTEXT_NAMESPACE "Diversion"
 
@@ -208,17 +215,23 @@ void OverrideLocalizationStrings()
 		FString("Submit Files"),
 		FString("Commit Files"),
 		100);
+
+	LocalizationResource.AddEntry(FTextKey("SourceControlCommands"),
+		FTextKey("SourceControlStatus_Error_ServerUnavailable"),
+		FString("Server Unavailable"),
+		FString("Sync Paused"),
+		100);
 	
 	FTextLocalizationManager::Get().UpdateFromLocalizationResource(LocalizationResource);
 }
 
 void FDiversionProvider::Init(bool bForceConnection)
 {
+	bDiversionStopped = false;
 	// Init() is called multiple times at startup: do not check dv each time
 	if (!bDiversionAvailable)
 	{
 		OverrideLocalizationStrings();
-		LastHttpTickTime = FPlatformTime::Seconds();
 		if (GetDiversionVersion(EConcurrency::Synchronous, true).IsValid())
 		{
 			GetWsInfo(EConcurrency::Synchronous, true);
@@ -226,8 +239,8 @@ void FDiversionProvider::Init(bool bForceConnection)
 		CheckDiversionAvailability();
 
 		// Handle "Resolve" on package save and "Finalize Merge"
-		ConflictedFiles.Empty();
 		UPackage::PackageSavedEvent.AddRaw(this, &FDiversionProvider::OnPackageSave);
+		UPackage::PreSavePackageWithContextEvent.AddRaw(this, &FDiversionProvider::OnPrePackageSave);
 
 		auto& Module = FDiversionModule::Get();
 		if (!DiversionUtils::DiversionValidityCheck(&Module != nullptr, 
@@ -246,13 +259,27 @@ void FDiversionProvider::Init(bool bForceConnection)
 		FGetWsInfo::SetProgressString();
 
 		// Set the project path delegate
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION <= 4
 		ISourceControlModule::Get().RegisterSourceControlProjectDirDelegate(
 			FSourceControlProjectDirDelegate::CreateLambda([this]() {
 				return WsInfo.Get().GetPath();
 			}));
+#else
+		ISourceControlModule::Get().RegisterCustomProjectsDelegate(
+			FSourceControlCustomProjectsDelegate::CreateLambda([this]() {
+				FSourceControlProjectInfo ProjectInfo;
+				ProjectInfo.ProjectDirectory = WsInfo.Get().GetPath();
+				ProjectInfo.ContentDirectories = { FPaths::ProjectContentDir() };
+				return TArray<FSourceControlProjectInfo>{ProjectInfo};
+			}));
+#endif
 
 		// Start background checks
 		auto BackgroundStatusDelegate = DiversionTimerDelegate::CreateLambda([this]() {
+			if (!bDiversionAvailable) {
+				return;
+			}
+
 			if (!DiversionUtils::DiversionValidityCheck(IsInGameThread(),
 	"Call Update Status called outside of main thread",
 					FDiversionModule::Get().GetOriginalAccountID())) {
@@ -262,23 +289,62 @@ void FDiversionProvider::Init(bool bForceConnection)
 			const auto Operation = ISourceControlOperation::Create<FUpdateStatus>();
 			Execute(Operation, nullptr, { WsInfo.Get().GetPath() }, EConcurrency::Asynchronous);
 		});
+		
 		BackgroundStatus = MakeUnique<FTimedDelegateWrapper>(
-			BackgroundStatusDelegate, 5.f);
+			BackgroundStatusDelegate, SECONDS_TO_POLL_STATUS);
 		BackgroundStatus->Start();
 
-		auto BackgroundPotentialConflictsDelegate = DiversionTimerDelegate::CreateLambda([this]() {
+		auto BackgroundPotentialClashesDelegate = DiversionTimerDelegate::CreateLambda([this]() {
+			if (!bDiversionAvailable) {
+				return;
+			}
+
 			if (!DiversionUtils::DiversionValidityCheck(IsInGameThread(),
-			"Get Potential Conflicts called outside of main thread",
+			"Get Potential Clashes called outside of main thread",
 					FDiversionModule::Get().GetOriginalAccountID())) {
 				return;
 			}
 
-			auto operation = ISourceControlOperation::Create<FGetPotentialConflicts>();
+			auto operation = ISourceControlOperation::Create<FGetPotentialClashes>();
 			Execute(operation, nullptr, { WsInfo.Get().GetPath() }, EConcurrency::Asynchronous);
 		});
-		BackgroundPotentialConflicts = MakeUnique<FTimedDelegateWrapper>(
-			BackgroundPotentialConflictsDelegate, 60.f);
-		BackgroundPotentialConflicts->Start();
+
+		BackgroundPotentialClashes = MakeUnique<FTimedDelegateWrapper>(
+			BackgroundPotentialClashesDelegate, SECONDS_TO_POLL_POTENTIAL_CLASHES);
+		BackgroundPotentialClashes->Start();
+
+
+		auto BackgroundConflictedFilesDelegate = DiversionTimerDelegate::CreateLambda([this]() {
+			if (!bDiversionAvailable) {
+				return;
+			}
+			
+			if (!DiversionUtils::DiversionValidityCheck(IsInGameThread(),
+			"Get Conflicts called outside of main thread",
+					FDiversionModule::Get().GetOriginalAccountID())) {
+				return;
+			}
+
+			auto operation = ISourceControlOperation::Create<FGetConflictedFiles>();
+			Execute(operation, nullptr, { }, EConcurrency::Asynchronous);
+		});
+
+		BackgroundConflictedFiles = MakeUnique<FTimedDelegateWrapper>(
+			BackgroundConflictedFilesDelegate, SECONDS_TO_POLL_CONFLICTED_FILES);
+		BackgroundConflictedFiles->Start();
+		BackgroundConflictedFiles->TriggerInstantCallAndReset();
+
+		// Add the Diversion potential clash indicator to the asset view
+		SPotentialClashIndicator::CacheIndicatorBrush();
+		if (FContentBrowserModule* ContentBrowserModule = FModuleManager::Get().GetModulePtr<FContentBrowserModule>(TEXT("ContentBrowser")))
+		{
+			if (!PotentialClashUIIconDelegateHandle.IsValid()) {
+				PotentialClashUIIconDelegateHandle = ContentBrowserModule->AddAssetViewExtraStateGenerator(FAssetViewExtraStateGenerator(
+					FOnGenerateAssetViewExtraStateIndicators::CreateRaw(this, &FDiversionProvider::OnGenerateAssetViewPotentialClashIcon),
+					FOnGenerateAssetViewExtraStateIndicators::CreateRaw(this, &FDiversionProvider::OnGenerateAssetViewPotentialClashTooltip)
+				));
+			}
+		}
 	}
 
 	// TODO bForceConnection: used by commandlets (typically for CI/CD scripts)
@@ -330,6 +396,7 @@ void FDiversionProvider::Close()
 
 	bDiversionAvailable = false;
 	UserEmail.Empty();
+	bDiversionStopped = true;
 
 	// Wait for all commands to finish but exit if it takes too long
 	// This is to avoid a deadlock when the engine is shutting down	
@@ -347,6 +414,16 @@ void FDiversionProvider::Close()
 
 	// Reset localization strings
 	FTextLocalizationManager::Get().RefreshResources();
+
+
+	if (FContentBrowserModule* ContentBrowserModule = FModuleManager::Get().GetModulePtr<FContentBrowserModule>(TEXT("ContentBrowser")))
+	{
+		if (PotentialClashUIIconDelegateHandle.IsValid())
+		{
+			ContentBrowserModule->RemoveAssetViewExtraStateGenerator(PotentialClashUIIconDelegateHandle);
+		}
+	}
+	PotentialClashUIIconDelegateHandle.Reset();
 }
 
 FText FDiversionProvider::GetStatusText() const
@@ -442,6 +519,7 @@ void FDiversionProvider::SetWorkspaceInfo(const WorkspaceInfo& InWsInfo)
 		return;
 	}
 
+	bDiversionAvailable = WsInfo.Get().IsValid();
 	WsInfo.Set(InWsInfo);
 }
 
@@ -469,8 +547,11 @@ bool FDiversionProvider::IsRepoFound() const {
 bool FDiversionProvider::IsAvailable() const
 {
 	return IsRepoFound() && IsAgentAlive() && 
-		((SyncStatus.Get() == DiversionUtils::EDiversionWsSyncStatus::InProgress) ||
-		(SyncStatus.Get() == DiversionUtils::EDiversionWsSyncStatus::Completed));
+		(
+			SyncStatus.Get() == DiversionUtils::EDiversionWsSyncStatus::PathError  ||
+			SyncStatus.Get() == DiversionUtils::EDiversionWsSyncStatus::InProgress ||
+			SyncStatus.Get() == DiversionUtils::EDiversionWsSyncStatus::Completed
+		);
 }
 
 const FName& FDiversionProvider::GetName(void) const
@@ -503,6 +584,44 @@ ECommandResult::Type FDiversionProvider::GetState(const TArray<FString>& InFiles
 void FDiversionProvider::AddModifiedState(const TSharedRef<class FDiversionState>& InState)
 {
 	ModifiedStates.Add(InState->LocalFilename, InState);
+	ChangelistState->Files.Add(InState);
+}
+
+bool FDiversionProvider::IsRepoWithSameNameExists(const FString& RepoName, EConcurrency::Type Concurrency, bool InForceUpdate) {
+	if (!DiversionUtils::DiversionValidityCheck(IsInGameThread(),
+		"IsRepoWithSameNameExists must be called on the main game thread", FDiversionModule::Get().GetOriginalAccountID())) {
+		return bRepoWithSameNameExists.Get();
+	}
+
+	return bRepoWithSameNameExists.GetUpdate(bRepoWithSameNameExists.Get(),
+		FOnCacheUpdate::CreateLambda([this, &Concurrency, &RepoName]() {
+			auto operation = ISourceControlOperation::Create<FCheckForRepoWithSameName>();
+			operation->SetRepoName(RepoName);
+			Execute(operation, nullptr, TArray<FString>(), Concurrency);
+		}), InForceUpdate);
+}
+
+bool FDiversionProvider::IsWorkspaceExistsInPath(const FString& RepoName, const FString& Path, EConcurrency::Type Concurrency, bool InForceUpdate) {
+	if (!DiversionUtils::DiversionValidityCheck(IsInGameThread(),
+		"IsWorkspaceExistsInPath must be called on the main game thread", FDiversionModule::Get().GetOriginalAccountID())) {
+		return bWorkspaceExistsInPath.Get();
+	}
+	return bWorkspaceExistsInPath.GetUpdate(bWorkspaceExistsInPath.Get(),
+		FOnCacheUpdate::CreateLambda([this, &Concurrency, &RepoName, &Path]() {
+			auto operation = ISourceControlOperation::Create<FCheckIfWorkspaceExistsInPath>();
+			operation->SetPath(Path);
+			operation->SetRepoName(RepoName);
+			Execute(operation, nullptr, TArray<FString>(), Concurrency);
+		}), InForceUpdate);
+}
+
+void FDiversionProvider::AddCurrentChangesToChangelistState()
+{
+	ChangelistState->Files.Empty();
+	for (auto& state : ModifiedStates)
+	{
+		ChangelistState->Files.Add(state.Value);
+	}
 }
 
 void FDiversionProvider::UpdateModifiedStates(const TMap<FString, TSharedRef<FDiversionState>>& InNewModifiedStates)
@@ -514,10 +633,15 @@ void FDiversionProvider::UpdateModifiedStates(const TMap<FString, TSharedRef<FDi
 	}
 	// Reset the list of modified states only if we requested a full repo status update
 	ModifiedStates = InNewModifiedStates;
+	AddCurrentChangesToChangelistState();
 }
 
-bool FDiversionProvider::UpdateCachedStates(const TMap<FString, FDiversionState>& InNewStates,
-	const bool IsFullStatusUpdate, const TMap<FString, FDiversionResolveInfo>& InConflictedFiles)
+bool FDiversionProvider::IsPackageExpired(const FSyncInaccessiblePackages& SyncInaccessiblePackage) const
+{
+	return FDateTime::Now() - SyncInaccessiblePackage.LockTime > SyncInaccessiblePackageRefreshTime;
+}
+
+bool FDiversionProvider::UpdateCachedStates(const TMap<FString, FDiversionState>& InNewStates, const bool IsFullStatusUpdate)
 {
 	int NbStatesUpdated = 0;
 	TMap<FString, TSharedRef<FDiversionState>> NewModifiedStates;
@@ -527,7 +651,6 @@ bool FDiversionProvider::UpdateCachedStates(const TMap<FString, FDiversionState>
 	{
 		const TSharedRef<FDiversionState> CachedState = GetStateInternal(NewStateValue.LocalFilename);
 		CachedState->WorkingCopyState = NewStateValue.WorkingCopyState;
-		CachedState->PendingResolveInfo = NewStateValue.PendingResolveInfo;
 		CachedState->TimeStamp = NewStateValue.TimeStamp;
 		if(NewStateValue.Hash != TEXT(""))
 		{
@@ -567,16 +690,64 @@ bool FDiversionProvider::UpdateCachedStates(const TMap<FString, FDiversionState>
 		}
 	}
 
-	// TODO: Separate the handling of conflicted files from the general state update
-	// Handle conflicted files
-	ConflictedFiles = InConflictedFiles;
-	UpdateConflictedStates();
-
 	BackgroundStatusSkipToNextInterval();
 	return (NbStatesUpdated > 0);
 }
 
-bool FDiversionProvider::UpdatePotentialConflictStates(
+bool FDiversionProvider::UpdateConflictedStates(const TMap<FString, FDiversionResolveInfo>& ConflictedFilesData)
+{
+	int NbStatesUpdated = 0;
+
+	// Reset the states data
+	for(auto& [_, State] : ConflictedStates)
+	{
+		State->ClearResolveInfo();
+	}
+	ConflictedStates.Empty();
+	
+	// Update the conflicted states
+	for(auto& [FilePath, ResolveInfo] : ConflictedFilesData)
+	{
+		const TSharedRef<FDiversionState> CachedState = GetStateInternal(FilePath);
+		CachedState->AddPendingResolveInfo(ResolveInfo);
+		ConflictedStates.Add(FilePath, CachedState);
+		NbStatesUpdated++;
+	}
+
+	return (NbStatesUpdated > 0);
+}
+
+bool FDiversionProvider::RemoveConflictedState(const FString& Path)
+{
+	auto ConflictedState = ConflictedStates.Find(Path);
+	if(ConflictedState == nullptr)
+	{
+		return false;
+	}
+	ConflictedState->Get().ClearResolveInfo();
+	return ConflictedStates.Remove(Path) > 0;
+}
+
+TUniquePtr<FDiversionResolveInfo> FDiversionProvider::GetFileResolveInfo(const FString& Path) const
+{
+	if(const auto* ResolveInfo = ConflictedStates.Find(Path); ResolveInfo != nullptr)
+	{
+		return MakeUnique<FDiversionResolveInfo>(ResolveInfo->Get().GetPendingResolveInfo());
+	}
+	return nullptr;
+}
+
+void FDiversionProvider::GetConflictedFilesPaths(TArray<FString>& OutArray) const
+{
+	return ConflictedStates.GenerateKeyArray(OutArray);
+}
+
+void FDiversionProvider::SetFilesToResolve(const TMap<FString, FDiversionResolveInfo>& InFilesToResolve)
+{
+    FilesToResolve = InFilesToResolve;
+}
+
+bool FDiversionProvider::UpdatePotentialClashedStates(
 	const TMap<FString, TArray<EDiversionPotentialClashInfo>>& InPotentialClashes,
 	bool IsFullStatusUpdate)
 {
@@ -590,7 +761,7 @@ bool FDiversionProvider::UpdatePotentialConflictStates(
 	{
 		TArray<FString> KeysToRemove;
 		// Reset the potential clashes that are no longer in the list
-		for(auto& [FileName, State] : PotentialClashesCache)
+		for(auto& [FileName, State] : PotentiallyClashedStates)
 		{
 			if(!InPotentialClashes.Contains(FileName))
 			{
@@ -603,14 +774,14 @@ bool FDiversionProvider::UpdatePotentialConflictStates(
 		// Remove the keys that are no longer in the list
 		for(const auto& Key : KeysToRemove)
 		{
-			PotentialClashesCache.Remove(Key);
+			PotentiallyClashedStates.Remove(Key);
 		}
 	}
 	
 	// Update existing states or add new ones
 	for(const auto& [Filename, PotentialClashInfo] : InPotentialClashes)
 	{
-		if(const auto* CachedState = PotentialClashesCache.Find(Filename); CachedState != nullptr)
+		if(const auto* CachedState = PotentiallyClashedStates.Find(Filename); CachedState != nullptr)
 		{
 			(*CachedState)->PotentialClashes.SetPotentialClashes(PotentialClashInfo);
 		}
@@ -618,7 +789,7 @@ bool FDiversionProvider::UpdatePotentialConflictStates(
 		{
 			TSharedRef<FDiversionState> NewCachedState = GetStateInternal(Filename);
 			NewCachedState->PotentialClashes.SetPotentialClashes(PotentialClashInfo);
-			PotentialClashesCache.Add(Filename, NewCachedState);
+			PotentiallyClashedStates.Add(Filename, NewCachedState);
 		}
 		NbStatesUpdated++;
 	}
@@ -626,23 +797,9 @@ bool FDiversionProvider::UpdatePotentialConflictStates(
 	return (NbStatesUpdated > 0);
 }
 
-void FDiversionProvider::UpdateConflictedStates()
-{
-	for(auto& [FileName, ConflictInfo] : ConflictedFiles)
-	{
-		const TSharedRef<FDiversionState> CachedState = GetStateInternal(FileName);
-		CachedState->WorkingCopyState = EWorkingCopyState::Conflicted;
-		CachedState->PendingResolveInfo = ConflictInfo;
-
-		// Add to modified states cache so they will be reseted once merges are resolved or removed
-		AddModifiedState(CachedState);
-	}
-}
-
-
 void FDiversionProvider::GetCurrentPotentialClashes(TArray<FString>& OutPotentialClashedPaths) const
 {
-	PotentialClashesCache.GetKeys(OutPotentialClashedPaths);
+	PotentiallyClashedStates.GetKeys(OutPotentialClashedPaths);
 }
 
 TSharedRef<FDiversionState, ESPMode::ThreadSafe> FDiversionProvider::GetStateInternal(const FString& Filename)
@@ -662,14 +819,20 @@ TSharedRef<FDiversionState, ESPMode::ThreadSafe> FDiversionProvider::GetStateInt
 	}
 }
 
-void FDiversionProvider::AddSynchingState(const FString& Path, const TSharedRef<class FDiversionState>& InState)
+void FDiversionProvider::AddSyncingState(const FString& Path, const TSharedRef<class FDiversionState>& InState)
 {
 	SynchingStates.Add(Path, InState);
 }
 
 ECommandResult::Type FDiversionProvider::GetState(const TArray<FSourceControlChangelistRef>& InChangelists, TArray<FSourceControlChangelistStateRef>& OutState, EStateCacheUsage::Type InStateCacheUsage)
 {
-	return ECommandResult::Failed;
+	if (!IsEnabled())
+	{
+		return ECommandResult::Failed;
+	}
+	OutState.Add(ChangelistState);
+	
+	return ECommandResult::Succeeded;
 }
 
 bool IsConfigFile(const FString& FilePath)
@@ -726,6 +889,10 @@ void FDiversionProvider::UnregisterSourceControlStateChanged_Handle(FDelegateHan
 
 ECommandResult::Type FDiversionProvider::Execute(const FSourceControlOperationRef& InOperation, FSourceControlChangelistPtr InChangelist, const TArray<FString>& InFiles, EConcurrency::Type InConcurrency, const FSourceControlOperationComplete& InOperationCompleteDelegate)
 {
+	if (bDiversionStopped) {
+		return ECommandResult::Failed;
+	}
+
 	// Workers/Commands must not call to other workers/commands and to this command directly!
 	// Workers should call directly to the SyncAPI methods and update the provider state accordingly
 	if (!DiversionUtils::DiversionValidityCheck(IsInGameThread(),
@@ -796,12 +963,12 @@ bool FDiversionProvider::UsesLocalReadOnlyState() const
 
 bool FDiversionProvider::UsesChangelists() const
 {
-	return false;
+	return true;
 }
 
 bool FDiversionProvider::UsesUncontrolledChangelists() const
 {
-	return true;
+	return false;
 }
 
 bool FDiversionProvider::UsesCheckout() const
@@ -840,6 +1007,19 @@ TOptional<int> FDiversionProvider::GetNumLocalChanges() const
 	}
 }
 
+TSharedRef<SWidget> FDiversionProvider::OnGenerateAssetViewPotentialClashIcon(const FAssetData& AssetData) {
+	return SNew(SPotentialClashIndicator).AssetPath(
+		DiversionUtils::GetFilePathFromAssetData(AssetData)
+	);
+}
+
+TSharedRef<SWidget> FDiversionProvider::OnGenerateAssetViewPotentialClashTooltip(const FAssetData& AssetData)
+{
+	return SNew(SPotentialClashTooltip).AssetPath(
+		DiversionUtils::GetFilePathFromAssetData(AssetData)
+	);
+}
+
 TSharedPtr<IDiversionWorker, ESPMode::ThreadSafe> FDiversionProvider::CreateWorker(const FName& InOperationName) const
 {
 	const FGetDiversionWorker* Operation = WorkersMap.Find(InOperationName);
@@ -856,7 +1036,7 @@ void FDiversionProvider::RegisterWorker(const FName& InName, const FGetDiversion
 	WorkersMap.Add(InName, InDelegate);
 }
 
-void FDiversionProvider::OutputCommandMessages(const FDiversionCommand& InCommand) const
+void FDiversionProvider::OutputCommandMessages(const FDiversionCommand& InCommand)
 {
 	FMessageLog SourceControlLog("SourceControl");
 
@@ -869,21 +1049,24 @@ void FDiversionProvider::OutputCommandMessages(const FDiversionCommand& InComman
 	{
 		SourceControlLog.Info(FText::FromString(InCommand.InfoMessages[InfoIndex]));
 	}
+
+	if(InCommand.PopupNotification.IsValid())
+	{
+		NotificationManager.ShowNotification(*(InCommand.PopupNotification));
+	}
 }
 
 void FDiversionProvider::Tick()
 {
-	if (bDiversionAvailable) {
-		// Revalidate the agent status and WsInfo
-		IsAgentAlive(EConcurrency::Asynchronous, ReloadStatusRequired);
-		GetWsInfo(EConcurrency::Asynchronous, ReloadStatusRequired);
-		if(ReloadStatusRequired)
-		{
-			ReloadStatusRequired = false;
-		}
+
+	// Revalidate the agent status and WsInfo
+	IsAgentAlive(EConcurrency::Asynchronous, ReloadStatusRequired);
+	GetWsInfo(EConcurrency::Asynchronous, ReloadStatusRequired);
+	if(ReloadStatusRequired)
+	{
+		ReloadStatusRequired = false;
 	}
 
-	DiversionUtils::HttpTick(LastHttpTickTime);
 	bool bStatesUpdated = false;
 	for (int32 CommandIndex = 0; CommandIndex < CommandQueue.Num(); ++CommandIndex)
 	{
@@ -989,7 +1172,7 @@ ECommandResult::Type FDiversionProvider::ExecuteSynchronousCommand(FDiversionCom
 
 ECommandResult::Type FDiversionProvider::IssueCommand(FDiversionCommand& InCommand)
 {
-	if (GThreadPool != nullptr)
+	if (GThreadPool != nullptr && CommandQueue.Num() < GThreadPool->GetNumThreads())
 	{
 		// Queue this to our worker thread(s) for resolving
 		GThreadPool->AddQueuedWork(&InCommand);
@@ -998,46 +1181,334 @@ ECommandResult::Type FDiversionProvider::IssueCommand(FDiversionCommand& InComma
 	}
 	else
 	{
-		FText Message(LOCTEXT("NoSCCThreads", "There are no threads available to process the revision control command."));
-
+		FText Message(
+            FText::Format(LOCTEXT("NoSCCThreads", "There are no threads available to process the revision control command: {0}."), FText::FromName(InCommand.Worker->GetName()))
+		);
 		FMessageLog("SourceControl").Error(Message);
-		InCommand.bCommandSuccessful = false;
 		InCommand.Operation->AddErrorMessge(Message);
+		UE_LOG(LogSourceControl, Error, TEXT("There are no threads available to process the revision control command: %s."), *(InCommand.Worker->GetName().ToString()));
+		
+		int availableThreads = (GThreadPool != nullptr) ? GThreadPool->GetNumThreads() : 0;
+		UE_LOG(LogSourceControl, Error, TEXT("There are currently %d active worker threads out of: %d"), CommandQueue.Num(), availableThreads);
+		for (auto& cmd : CommandQueue) {
+			UE_LOG(LogSourceControl, Error, TEXT("% s"), *(cmd->Worker->GetName().ToString()));
+		}
 
-		return InCommand.ReturnResults();
+		InCommand.MarkOperationCompleted(false);
+		return ECommandResult::Cancelled;
 	}
 }
 
-void FDiversionProvider::OnPackageSave(const FString& PackageFileName, UObject* Outer)
+void RemoveCallbackRestoreAfterFileFinishedSyncing(const FString& RestoreDestPath, int DirectoryWatcherHandleIndex)
+{
+	auto& Provider = FDiversionModule::Get().GetProvider();
+	FDelegateHandle DirectoryWatcherHandle = Provider.GetRestoreAfterSyncDelegateHandle(DirectoryWatcherHandleIndex);
+	if (DirectoryWatcherHandle.IsValid() && FModuleManager::Get().IsModuleLoaded("DirectoryWatcher"))
+	{
+		IDirectoryWatcher* DirectoryWatcher = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>("DirectoryWatcher").Get();
+		FString DirectoryPath = FPaths::GetPath(RestoreDestPath);
+		DirectoryWatcher->UnregisterDirectoryChangedCallback_Handle(DirectoryPath, DirectoryWatcherHandle);
+		Provider.RemoveRestoreAfterSyncDelegateHandle(DirectoryWatcherHandleIndex);
+	}
+}
+
+void RestoreFileAfterSync(const FString& RestoreDestPath,
+	int DirectoryWatcherHandleIndex, const TArray<FFileChangeData>& FileChanges)
+{
+	FString NormalizedRestoreDestPath = RestoreDestPath.Replace(TEXT("\\"), TEXT("/"));
+	for (const FFileChangeData& Change : FileChanges)
+	{
+		FString NormalizedChangePath = Change.Filename.Replace(TEXT("\\"), TEXT("/"));
+		if (NormalizedChangePath.Equals(NormalizedRestoreDestPath) && Change.Action == FFileChangeData::FCA_Modified)
+		{
+			try {
+				auto* LoadPackage = DiversionUtils::UPackageUtils::PackageFromPath(NormalizedChangePath);
+				UPackageTools::ReloadPackages({ LoadPackage });
+			}
+			catch (const std::exception& e) {
+				UE_LOG(LogSourceControl, Error, TEXT("Failed to reload package: %s"), *FString(e.what()));
+			}
+
+			UE_LOG(LogSourceControl, Display, TEXT("Detected modification of %s and restored unsaved changes."), *RestoreDestPath);
+			// Unregister the callback after the file has been restored
+			RemoveCallbackRestoreAfterFileFinishedSyncing(RestoreDestPath, DirectoryWatcherHandleIndex);
+			return;
+		}
+	}
+}
+
+void RegisterCallbackRestoreAfterFileFinishedSyncing(const FString& PackagePath)
+{
+	if (FModuleManager::Get().IsModuleLoaded("DirectoryWatcher"))
+	{
+		auto& Provider = FDiversionModule::Get().GetProvider();
+		int DirectoryWatcherHandleIndex = Provider.AddRestoreAfterSyncDelegateHandle();
+		IDirectoryWatcher* DirectoryWatcher = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>("DirectoryWatcher").Get();
+		FString DirectoryPath = FPaths::GetPath(PackagePath);
+		DirectoryWatcher->RegisterDirectoryChangedCallback_Handle(
+			DirectoryPath,
+			// The actual callback that will be called when the file is modified
+			// It will also unregister its delegate handle after the file has been restored
+			IDirectoryWatcher::FDirectoryChanged::CreateLambda([PackagePath, DirectoryWatcherHandleIndex](const TArray<FFileChangeData>& FileChanges)
+				{
+					RestoreFileAfterSync(PackagePath, DirectoryWatcherHandleIndex, FileChanges);
+				}),
+			Provider.GetRestoreAfterSyncDelegateHandle(DirectoryWatcherHandleIndex));
+
+		UE_LOG(LogTemp, Display, TEXT("Started monitoring directory: %s"), *DirectoryPath);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("DirectoryWatcher module is not loaded, cannot monitor file changes"));
+	}
+}
+
+void FDiversionProvider::OnPrePackageSave(UPackage* Package, FObjectPreSaveContext SaveContext)
+{
+	const FString FileName = FPaths::ConvertRelativePathToFull(SaveContext.GetTargetFilename());
+
+#if PLATFORM_WINDOWS
+	const FString OSNormalizedFileName = FileName.Replace(TEXT("/"), TEXT("\\"));
+#else
+	const FString OSNormalizedFileName = FileName;
+#endif
+	if (GetSyncInaccessiblePackages(OSNormalizedFileName)) {
+		// Handling saving local-remote conflicted files
+		// It's should be safe to assume that if we're saving a loaded file it 
+		// means we will have conflicts against the remote version
+		FText OnSaveLoadedPAckageMessage = FText::Format(
+			LOCTEXT("DiversionLockedFiles_OnSaveMessage",
+				"The file \"{0}\" has been updated in the cloud repo."
+				"To protect your unsaved local changes, Diversion created a backup copy with a `_resolved` postfix."
+				"This backup allows you to compare your changes with the incoming version."),
+			FText::FromString(FileName));
+
+		FDiversionNotification PopUpNotification(
+			OnSaveLoadedPAckageMessage,
+			TArray<FNotificationButtonInfo>(),
+			SNotificationItem::CS_Fail);
+		NotificationManager.ShowNotification(PopUpNotification);
+		RegisterCallbackRestoreAfterFileFinishedSyncing(OSNormalizedFileName);
+		if (!DiversionUtils::UPackageUtils::BackupUnsavedChanges(Package)) {
+			// Fallback to simple OS file copy -- Note, this makes the package undetectable by UE!
+			// To use it you'll need to rename it back to the originals file name (overriding the exitsing asset).
+			// This should be used only as a last resort if copying the package with UE asset tools failed.
+			DiversionUtils::UPackageUtils::MakeSimpleOSCopyPackageBackup(OSNormalizedFileName, FPaths::GetPath(OSNormalizedFileName));
+		}
+
+		if (DiversionUtils::UPackageUtils::IsPackageOpenedInEditor(Package->GetName())) {
+			DiversionUtils::UPackageUtils::ClosePackageEditor(Package);
+		}
+		Package->SetDirtyFlag(false);
+		RemoveSyncInaccessiblePackage(OSNormalizedFileName);
+	}
+}
+
+void FDiversionProvider::OnPackageSave(const FString& PackageFileName, UObject*)
 {
 	const FString FileName = FPaths::ConvertRelativePathToFull(PackageFileName);
-	if (const auto CurrentResolveInfo = FilesToResolve.Find(FileName))
-	{
-		const auto MergeId = CurrentResolveInfo->MergeId;
 
+	// After a file resolve operation is called, after the file was saved we need to
+	// trigger a Diversion Resolve operation on it
+	// If we left with 0 files to resolve, we can finalize the merge 
+	if (const auto FileResolveInfo = FilesToResolve.Find(FileName))
+	{
+		FString MergeId = FileResolveInfo->MergeId;
 		auto ResolveFileOperation = ISourceControlOperation::Create<FResolveFile>();
 		ResolveFileOperation->SetMergeID(MergeId);
-		ResolveFileOperation->SetConflictID(CurrentResolveInfo->ConflictId);
+		ResolveFileOperation->SetConflictID(FileResolveInfo->ConflictId);
 		Execute(ResolveFileOperation, nullptr, {FileName}, EConcurrency::Synchronous);
 
 		FilesToResolve.Remove(FileName);
 		// We will revert the change only after finalizing the merge to avoid losing the changes
 		FilesToRevert.Add(FileName);
 
-		if (ConflictedFiles.Num() + FilesToResolve.Num() == 0)
+		if (ConflictedStates.Num() + FilesToResolve.Num() == 0)
 		{
 			// Run finalize merge and wait for it to finish
 			auto FinalizeMergeOperation = ISourceControlOperation::Create<FFinalizeMerge>();
 			FinalizeMergeOperation->SetMergeID(MergeId);
-			Execute(FinalizeMergeOperation, nullptr, {}, EConcurrency::Synchronous);
-			
-			// TODO: What should we do if the Finalize merge failed?
-
-			// Reset the workspace to avoid showing wrong changes - We committed them in the merge already
-			Execute(ISourceControlOperation::Create<FRevert>(), nullptr, 
-				FilesToRevert, EConcurrency::Synchronous);
+			Execute(FinalizeMergeOperation, nullptr, {}, EConcurrency::Synchronous,
+			FSourceControlOperationComplete::CreateLambda([this](const FSourceControlOperationRef&, ECommandResult::Type InResult) {
+				if (InResult == ECommandResult::Succeeded)
+				{
+					// Reset the workspace to avoid showing wrong changes - We committed them in the merge already
+					Execute(ISourceControlOperation::Create<FRevert>(), nullptr, 
+						FilesToRevert, EConcurrency::Synchronous);
+				}
+			}));
 		}
 	}
+}
+
+void FDiversionProvider::RemoveRestoreAfterSyncDelegateHandle(int DelegateHandleIndex)
+{
+	DirectoryWatcherHandles.RemoveAtSwap(DelegateHandleIndex);
+}
+
+bool FDiversionProvider::ReleaseLockedPackage(UPackage* Package, const FString& PackagePath)
+{
+	UE_LOG(LogSourceControl, Warning,
+	       TEXT("'%s' possibly opened by UE, attempting to close it to continue Diversion agent syncing"),
+	       *PackagePath);
+	if (UPackageTools::UnloadPackages({ Package }))
+	{
+		RemoveSyncInaccessiblePackage(PackagePath);
+		UE_LOG(LogSourceControl, Display, TEXT("Successfully unloaded package: '%s'"), *PackagePath);
+		return true;
+	}
+		
+	UE_LOG(LogSourceControl, Warning,
+	       TEXT("Failed to unload the opened package: '%s', make sure the file is not being edited somewhere else, "
+		       "is not 'readonly' and you have the permissions to edit it."), *PackagePath);
+	return false;
+}
+
+void FDiversionProvider::HandleUnsavedPackage(UPackage* Package, const FString& PackagePath, const FString& PackageName)
+{
+	// Notify only if the package isn't in the SyncInaccessiblePackages list
+	if (GetSyncInaccessiblePackages(PackagePath))
+	{
+		return;
+	}
+	
+	FNotificationButtonInfo KeepChangesButton(LOCTEXT("DiversionPopup_BackupMineButton", "Backup"),
+		LOCTEXT("DiversionPopup_BackupMineButton_Tooltip", 
+			"Save a copy of your current changes to a new file with a `_resolved` postfix. The package will be closed, and both versions can be opened from the drawer for comparison."),
+		FSimpleDelegate::CreateLambda([Package, PackagePath]() {
+			if (!DiversionUtils::UPackageUtils::BackupUnsavedChanges(Package)) {
+				// Fallback to simple OS file copy -- Note, this makes the package undetectable by UE!
+				// To use it you'll need to rename it back to the originals file name (overriding the exitsing asset).
+				// This should be used only as a last resort if copying the package with UE asset tools failed.
+				DiversionUtils::UPackageUtils::MakeSimpleOSCopyPackageBackup(PackagePath, FPaths::GetPath(PackagePath));
+			}
+			RegisterCallbackRestoreAfterFileFinishedSyncing(PackagePath);
+
+			// Actions needed to resume the synching
+			Package->SetDirtyFlag(false);
+			DiversionUtils::UPackageUtils::ClosePackageEditor(Package);
+	}),SNotificationItem::CS_Pending);
+	
+	FNotificationButtonInfo DiscardChangesButton(LOCTEXT("DiversionPopup_AcceptIncomingButton", "Accept incoming"),
+	LOCTEXT("DiversionPopup_AcceptIncomingButton_Tooltip", "Discard your local changes and update the package with the latest version from the cloud."),
+	FSimpleDelegate::CreateLambda([Package](){
+		// Actions needed to resume the synching
+		Package->SetDirtyFlag(false);
+		DiversionUtils::UPackageUtils::ClosePackageEditor(Package);
+	}),SNotificationItem::CS_Pending);
+
+	FText UnsavedChangesMessage = FText::Format(
+		LOCTEXT("LockedFiles_UnsavedMessage",
+				"The package \"{0}\" has been updated in the cloud repo." 
+			    "To protect your unsaved local changes, you can create a backup copy with a `_recovered` suffix."
+			    "This backup allows you to compare your changes with the incoming version."
+			    "Otherwise, your local changes will be overwritten by the update."),
+		FText::FromString(PackageName));
+		
+	FDiversionNotification PopUpNotification(
+		UnsavedChangesMessage,
+		TArray<FNotificationButtonInfo>({KeepChangesButton, DiscardChangesButton}),
+		SNotificationItem::CS_Pending
+	);
+
+	AddAndNotifySyncInaccessiblePackage(PackagePath, PopUpNotification);
+	UE_LOG(LogSourceControl, Warning, TEXT("%s"), *UnsavedChangesMessage.ToString());
+}
+
+void FDiversionProvider::HandleOpenedInEditorPackage(UPackage* Package, const FString& PackagePath, const FString& PackageName)
+{
+	// Notify only if the package isn't in the SyncInaccessiblePackages list
+	if (GetSyncInaccessiblePackages(PackagePath))
+	{
+		return;
+	}
+
+	FNotificationButtonInfo CloseButton(LOCTEXT("DiversionPopup_ClosePackageButton", "Close tabs"),
+	                                    LOCTEXT("DiversionPopup_ClosePackageButton_Tooltip", "Close the package opened editor tabs to continue syncing"),
+	                                    FSimpleDelegate::CreateLambda([Package]()
+	                                    {
+		                                    DiversionUtils::UPackageUtils::ClosePackageEditor(Package);
+	                                    }),
+	                                    SNotificationItem::CS_Pending);
+	FText OpenedChangesMessage =  FText::Format(
+		LOCTEXT("LockedFiles_OpenedMessage",
+		        "'{0}' is currently opened in the editor view - Close it in order to continue synching"),
+		FText::FromString(PackageName));
+
+	FDiversionNotification PopUpNotification(
+		OpenedChangesMessage,
+		TArray<FNotificationButtonInfo>({CloseButton}),
+		SNotificationItem::CS_Pending
+	);
+	AddAndNotifySyncInaccessiblePackage(PackagePath, PopUpNotification);
+	UE_LOG(LogSourceControl, Warning, TEXT("%s"), *OpenedChangesMessage.ToString());
+}
+
+void FDiversionProvider::AddAndNotifySyncInaccessiblePackage(const FString& Path, const FDiversionNotification& InNotificationInfo)
+{
+	FDiversionNotificationManager::FNotificationId NotificationId = NotificationManager.ShowNotification(InNotificationInfo);
+	SyncInaccessiblePackages.Add(Path, FSyncInaccessiblePackages({NotificationId, FDateTime::Now()}));
+}
+
+void FDiversionProvider::RemoveSyncInaccessiblePackage(const FString& PackagePath)
+{
+	if(FSyncInaccessiblePackages* SyncInaccessiblePackage = SyncInaccessiblePackages.Find(PackagePath))
+	{
+		NotificationManager.DismissNotification(SyncInaccessiblePackage->NotificationId);
+		SyncInaccessiblePackages.Remove(PackagePath);
+	}
+}
+
+bool FDiversionProvider::GetSyncInaccessiblePackages(const FString& PackagePath)
+{
+	if(FSyncInaccessiblePackages* SyncInaccessiblePackage = SyncInaccessiblePackages.Find(PackagePath))
+	{
+		// If the package has been locked for too long, remove it from the list
+		if(IsPackageExpired(*SyncInaccessiblePackage))
+		{
+			NotificationManager.DismissNotification(SyncInaccessiblePackage->NotificationId);
+			SyncInaccessiblePackages.Remove(PackagePath);
+			return false;
+		}
+		return true;
+	}
+	return false;
+}
+
+bool FDiversionProvider::TryUnloadingOpenedPackage(const FString& InOpenedPackagePath)
+{
+	const FString PackageName = FPackageName::FilenameToLongPackageName(InOpenedPackagePath);
+	UPackage* Package = DiversionUtils::UPackageUtils::PackageFromPath(InOpenedPackagePath);
+	
+	if (Package == nullptr)
+	{
+		UE_LOG(LogSourceControl, Warning, TEXT("'%s' is not a valid package, skipping unload"),
+		       *InOpenedPackagePath);
+		return false;
+	}
+
+	if (Package->IsDirty())
+	{
+		HandleUnsavedPackage(Package, InOpenedPackagePath, PackageName);
+		return false;
+	}
+
+	if (DiversionUtils::UPackageUtils::IsPackageOpenedInEditor(PackageName)) {
+		HandleOpenedInEditorPackage(Package, InOpenedPackagePath, PackageName);
+		return false;
+	}
+
+	return ReleaseLockedPackage(Package, InOpenedPackagePath);
+}
+
+int FDiversionProvider::AddRestoreAfterSyncDelegateHandle()
+{
+	return DirectoryWatcherHandles.Add(FDelegateHandle());
+}
+
+FDelegateHandle& FDiversionProvider::GetRestoreAfterSyncDelegateHandle(int DelegateHandleIndex)
+{
+	return DirectoryWatcherHandles[DelegateHandleIndex];
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -20,6 +20,8 @@ public:
 	/** Caches the indicator brushes for access. */
 	static void CacheIndicatorBrush();
 
+	virtual ~SPotentialClashIndicator() = default;
+
 private:
 
 	static bool IsAssetHasPotentialClashes(FString Path);
@@ -54,6 +56,7 @@ public:
 	 */
 	void Construct(const FArguments& InArgs);
 
+	virtual ~SPotentialClashTooltip() = default;
 private:
 
 	static bool IsAssetHasPotentialClashes(FString Path);

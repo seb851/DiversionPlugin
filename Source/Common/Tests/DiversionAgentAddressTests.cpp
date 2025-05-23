@@ -9,7 +9,7 @@
 DEFINE_LOG_CATEGORY_STATIC(LogDiversionAgentAddressTests, Log, All);
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDiversionAgentAddressTest, "Diversion.Tests.AgentAddress.GetAgentURL",
-                                 EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+								  EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 bool FDiversionAgentAddressTest::RunTest(const FString& Parameters)
 {

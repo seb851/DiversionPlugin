@@ -1,108 +1,86 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "SyncApiCall.h"
+
 #include "DiversionUtils.h"
 #include "DiversionCommand.h"
-#include "IDiversionStatusWorker.h"
-
-#include "OpenAPIRepositoryWorkspaceManipulationApi.h"
-#include "OpenAPIRepositoryWorkspaceManipulationApiOperations.h"
+#include "DiversionModule.h"
 
 
-using namespace CoreAPI;
+using namespace Diversion::CoreAPI;
 
-using FPotentialFileClashes = OpenAPIRepositoryWorkspaceManipulationApi;
-
-class FSyncPotentialFileClashes;
-using FPotentialFileClashesAPI = TSyncApiCall<
-	FSyncPotentialFileClashes,
-	FPotentialFileClashes::SrcHandlersv2WorkspaceGetOtherStatusesRequest,
-	FPotentialFileClashes::SrcHandlersv2WorkspaceGetOtherStatusesResponse,
-	FPotentialFileClashes::FSrcHandlersv2WorkspaceGetOtherStatusesDelegate,
-	FPotentialFileClashes,
-	&FPotentialFileClashes::SrcHandlersv2WorkspaceGetOtherStatuses,
-	AuthorizedCall,
-	// 	ResponseImplementation arguments types
-	const FDiversionCommand&, /*InCommand*/
-	TArray<FString>& /*InfoMessages*/,
-	TArray<FString>&, /*ErrorMessages*/
-	TMap<FString, TArray<EDiversionPotentialClashInfo>>& /*OutPotentialClashes*/>;
-
-
-class FSyncPotentialFileClashes final : public FPotentialFileClashesAPI {
-	friend FPotentialFileClashesAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(const FDiversionCommand& InCommand,
-		TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages,
-		TMap<FString, TArray<EDiversionPotentialClashInfo>>& OutPotentialClashes,
-		const FPotentialFileClashes::SrcHandlersv2WorkspaceGetOtherStatusesResponse& Response);
-};
-
-bool FSyncPotentialFileClashes::ResponseImplementation(const FDiversionCommand& InCommand,
-	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages,
-	TMap<FString, TArray<EDiversionPotentialClashInfo>>& OutPotentialClashes,
-	const FPotentialFileClashes::SrcHandlersv2WorkspaceGetOtherStatusesResponse& Response) {
-	if (!Response.IsSuccessful() || (Response.GetHttpResponseCode() != EHttpResponseCodes::Ok)) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
-		return false;
-	}
-
-	const FString WsPath = InCommand.WsInfo.GetPath();
-
-	for (auto& status : Response.Content.Statuses) {
-		auto FullStatusFilePath = DiversionUtils::ConvertRelativePathToDiversionFull(status.Path, WsPath);
-		TArray<EDiversionPotentialClashInfo> PotentialClashes;
-		for(auto& FileStatus : status.FileStatuses){
-			PotentialClashes.Add(EDiversionPotentialClashInfo(
-				FileStatus.CommitId,
-				FileStatus.WorkspaceId.GetPtrOrNull() ? *FileStatus.WorkspaceId : "",
-				FileStatus.BranchName.GetPtrOrNull() ? *FileStatus.BranchName : "N/a",
-				FileStatus.Author.Email.GetPtrOrNull() ? *FileStatus.Author.Email : "",
-				FileStatus.Author.FullName.GetPtrOrNull() ? *FileStatus.Author.FullName : "",
-				FileStatus.Mtime.GetPtrOrNull() ? *FileStatus.Mtime : -1
-			));
-		}
-		OutPotentialClashes.Add(FullStatusFilePath, PotentialClashes);
-	}
-	
-	// Remove outdated potential clash data
-	for (auto& Path : InCommand.Files)
-	{
-		if(!FPaths::IsUnderDirectory(Path, WsPath))
-		{
-			UE_LOG(LogSourceControl, Log, TEXT("Path: %s is not contained in the repo, skipping."), *Path);
-			continue;
-		}
-		auto FullStatusFilePath = DiversionUtils::ConvertRelativePathToDiversionFull(Path, WsPath);
-		if(OutPotentialClashes.Contains(FullStatusFilePath)) continue;
-		// Indicate that there are no potential clashes for the file we queried
-		OutPotentialClashes.Add(FullStatusFilePath, TArray<EDiversionPotentialClashInfo>());
-	}
-	
-	return true;
-}
-
-REGISTER_PARSE_TYPE(FSyncPotentialFileClashes);
 
 bool DiversionUtils::GetPotentialFileClashes(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, 
 TArray<FString>& OutErrorMessages, TMap<FString, TArray<EDiversionPotentialClashInfo>>& OutPotentialClashes, bool& OutRecurseCall)
 {
+
+	auto ErrorResponse = RepositoryWorkspaceManipulationApi::Fsrc_handlersv2_workspace_getOtherStatusesDelegate::Bind(
+		[&]() {
+			return false;
+		}
+	);
+	auto VariantResponse = RepositoryWorkspaceManipulationApi::Fsrc_handlersv2_workspace_getOtherStatusesDelegate::Bind(
+		[&](const TVariant<TSharedPtr<RefsFilesStatus>, TSharedPtr<Diversion::CoreAPI::Model::Error>>& Variant) {
+			
+			if (Variant.IsType<TSharedPtr<Diversion::CoreAPI::Model::Error>>()) {
+				auto Value = Variant.Get<TSharedPtr<Diversion::CoreAPI::Model::Error>>();
+				OutErrorMessages.Add(FString::Printf(TEXT("Received error for get other statuses call: %s"), *Value->mDetail));
+				return false;
+			}
+
+			if (!Variant.IsType<TSharedPtr<RefsFilesStatus>>()) {
+				// Unexpected response type
+				OutErrorMessages.Add("Unexpected response type");
+				return false;
+			}
+			auto Value = Variant.Get<TSharedPtr<RefsFilesStatus>>();
+
+			const FString WsPath = InCommand.WsInfo.GetPath();
+
+			for (auto& status : Value->mStatuses) {
+				auto FullStatusFilePath = DiversionUtils::ConvertRelativePathToDiversionFull(status.mPath, WsPath);
+				TArray<EDiversionPotentialClashInfo> PotentialClashes;
+				for (auto& FileStatus : status.mFile_statuses) {
+					PotentialClashes.Add(EDiversionPotentialClashInfo(
+						FileStatus.mCommit_id,
+						FileStatus.mWorkspace_id.GetPtrOrNull() ? *FileStatus.mWorkspace_id : "",
+						FileStatus.mBranch_name.GetPtrOrNull() ? *FileStatus.mBranch_name : "N/a",
+						FileStatus.mAuthor.mEmail.GetPtrOrNull() ? *FileStatus.mAuthor.mEmail : "",
+						FileStatus.mAuthor.mFull_name.GetPtrOrNull() ? *FileStatus.mAuthor.mFull_name : "",
+						FileStatus.mMtime.GetPtrOrNull() ? *FileStatus.mMtime : -1
+					));
+				}
+				OutPotentialClashes.Add(FullStatusFilePath, PotentialClashes);
+			}
+
+			// Remove outdated potential clash data
+			for (auto& Path : InCommand.Files)
+			{
+				if (!FPaths::IsUnderDirectory(Path, WsPath))
+				{
+					UE_LOG(LogSourceControl, Log, TEXT("Path: %s is not contained in the repo, skipping."), *Path);
+					continue;
+				}
+				auto FullStatusFilePath = DiversionUtils::ConvertRelativePathToDiversionFull(Path, WsPath);
+				if (OutPotentialClashes.Contains(FullStatusFilePath)) continue;
+				// Indicate that there are no potential clashes for the file we queried
+				OutPotentialClashes.Add(FullStatusFilePath, TArray<EDiversionPotentialClashInfo>());
+			}
+
+			return true;
+		}
+	);
+
+
 	const int PrefixesLimit = 20;
 	bool Success = true;
-	auto Request = FPotentialFileClashes::SrcHandlersv2WorkspaceGetOtherStatusesRequest();
-	Request.RepoId = InCommand.WsInfo.RepoID;
-	Request.WorkspaceId = InCommand.WsInfo.WorkspaceID;
 
 	// Recurse request if the full repo is being updated
 	bool FullRepoUpdateRequested = (InCommand.Files.Num() == 1) && (InCommand.Files[0] == InCommand.WsInfo.GetPath());
-	Request.Recurse = FullRepoUpdateRequested;
+	bool Recurse = FullRepoUpdateRequested;
 	OutRecurseCall = FullRepoUpdateRequested;
 	
 	TArray<FString> FullPrefixesArray = GetPathsCommonPrefixes(InCommand.Files, InCommand.WsInfo.GetPath()).Array();
 	int PrefixesRequestOffset = 0;
-
-	auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncPotentialFileClashes>();
 
 	while (PrefixesRequestOffset < FullPrefixesArray.Num()) {
 		// Get the relevant prefixes to sent to the BE in the current request
@@ -132,9 +110,10 @@ TArray<FString>& OutErrorMessages, TMap<FString, TArray<EDiversionPotentialClash
 		}
 
 		// Send request of the current offset
-		Request.PathPrefixes = RelativePartialPrefixesArray;
-		Success &= ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand, OutInfoMessages, 
-									OutErrorMessages, OutPotentialClashes);
+		Success &= FDiversionModule::Get().RepositoryWorkspaceManipulationAPIRequestManager->SrcHandlersv2WorkspaceGetOtherStatuses(
+			InCommand.WsInfo.RepoID, InCommand.WsInfo.WorkspaceID, TOptional<FString>(), RelativePartialPrefixesArray, TOptional<int32>(), TOptional<int32>(), Recurse, 
+			FDiversionModule::Get().GetAccessToken(InCommand.WsInfo.AccountID), {}, 5, 120).HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
+
 		if (!Success) {
 			break;
 		}

@@ -7,10 +7,19 @@
 #include "DiversionProvider.h"
 #include "DiversionUtils.h"
 
-#include <typeindex>
-#include <unordered_map>
 #include "ISourceControlModule.h"
 #include "DiversionCredentialsManager.h"
+#include "DiversionHttpManager.h"
+
+// API headers
+#include "DefaultApi.h"
+#include "SupportApi.h"
+#include "AnalyticsApi.h"
+#include "RepositoryManipulationApi.h"
+#include "RepositoryMergeManipulationApi.h"
+#include "RepositoryCommitManipulationApi.h"
+#include "RepositoryWorkspaceManipulationApi.h"
+#include "RepositoryManagementApi.h"
 
 /** Diversion Version Control Plugin for Unreal Engine */
 class FDiversionModule : public IModuleInterface
@@ -35,43 +44,6 @@ public:
 		// Other threads MUST NOT interact with the provider directly
 		check(IsInGameThread());
 		return DiversionProvider;
-	}
-
-	template<typename ApiCallType>
-	ApiCallType& GetApiCall()
-	{
-		checkf(ServiceStatusLock.IsValid(), TEXT("ServiceStatusLock is not valid!"));
-
-		const FString ApiCallName = TypeParseTraits<ApiCallType>::name;
-
-		{
-			// Lock only for reading
-			FRWScopeLock ReadWriteLock(*ServiceStatusLock, SLT_ReadOnly);
-			if(ApiCallCache.Contains(ApiCallName) && ApiCallCache[ApiCallName] != nullptr)
-			{
-				return *StaticCastSharedPtr<ApiCallType>(ApiCallCache[ApiCallName]);
-			}
-		}
-
-		FRWScopeLock ReadWriteLock(*ServiceStatusLock, SLT_Write);
-		// Double check in case another thread added the value
-		if (ApiCallCache.Contains(ApiCallName))
-		{
-			if (ApiCallCache[ApiCallName] == nullptr)
-			{
-				// This should never happen
-				UE_LOG(LogSourceControl, Error, TEXT("Diversion: ApiCallCache contains nullptr: %s"), *ApiCallName);
-				ApiCallCache.Remove(ApiCallName);
-			}
-			else {
-				return *StaticCastSharedPtr<ApiCallType>(ApiCallCache[ApiCallName]);
-			}
-		}
-
-		UE_LOG(LogSourceControl, Log, TEXT("Created a new instance for: %s"), *ApiCallName);
-		auto NewApiCall = MakeShared<ApiCallType>();
-		ApiCallCache.Add(ApiCallName, NewApiCall);
-		return *NewApiCall;
 	}
 
 	/**
@@ -143,4 +115,18 @@ private:
 
 	/** Saved global state of the extra confirmation checkbox when trying to open a potentially conflicted file */
 	ECheckBoxState bConflictedFileOpenConfirmCheckboxState = ECheckBoxState::Unchecked;
+
+public:
+
+// API Request Managers
+	TSharedPtr<DiversionHttp::FHttpRequestManager> CoreAPIClient; // Used to perform download file from URL
+
+	TUniquePtr<Diversion::AgentAPI::DefaultApi> AgentAPIRequestManager;
+	TUniquePtr<Diversion::CoreAPI::SupportApi> SupportAPIRequestManager;
+	TUniquePtr<Diversion::CoreAPI::AnalyticsApi> AnalyticsAPIRequestManager;
+	TUniquePtr<Diversion::CoreAPI::RepositoryManagementApi> RepositoryManagementAPIRequestManager;
+	TUniquePtr<Diversion::CoreAPI::RepositoryManipulationApi> RepositoryManipulationAPIRequestManager;
+	TUniquePtr<Diversion::CoreAPI::RepositoryMergeManipulationApi> RepositoryMergeManipulationAPIRequestManager;
+	TUniquePtr<Diversion::CoreAPI::RepositoryCommitManipulationApi> RepositoryCommitManipulationAPIRequestManager;
+	TUniquePtr<Diversion::CoreAPI::RepositoryWorkspaceManipulationApi> RepositoryWorkspaceManipulationAPIRequestManager;
 };

@@ -28,41 +28,41 @@ paths:
                 properties:
                   Version:
                     type: string
-  /token/core:
-    get:
-      summary: Get coreapi access token for the current user
-      operationId: "CoreAccessToken"
-      responses:
-        "400":
-          description: "No authenticated user"
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  AccessToken:
-                    type: string
-                  ExpiresAt:
-                    description: Expiration Unix timestamp in seconds
-                    type: integer
-                    format: int64
-                required:
-                  - AccessToken
-                  - ExpiresAt
-    post:
-      summary: Update / override coreapi credentials
-      operationId: UpdateCoreCredentials
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CoreApiCredentials"
-      responses:
-        "200":
-          description: OK
+#   /token/core:
+#     get:
+#       summary: Get coreapi access token for the current user
+#       operationId: "CoreAccessToken"
+#       responses:
+#         "400":
+#           description: "No authenticated user"
+#         "200":
+#           description: OK
+#           content:
+#             application/json:
+#               schema:
+#                 type: object
+#                 properties:
+#                   AccessToken:
+#                     type: string
+#                   ExpiresAt:
+#                     description: Expiration Unix timestamp in seconds
+#                     type: integer
+#                     format: int64
+#                 required:
+#                   - AccessToken
+#                   - ExpiresAt
+#     post:
+#       summary: Update / override coreapi credentials
+#       operationId: UpdateCoreCredentials
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               $ref: "#/components/schemas/CoreApiCredentials"
+#       responses:
+#         "200":
+#           description: OK
   /workspaces:
     get:
       summary: Get all workspaces
@@ -95,6 +95,9 @@ paths:
                 type: object
                 additionalProperties:
                   $ref: "#/components/schemas/WorkspaceConfiguration"
+
+
+
   /repo/init:
     post:
       summary: Create repo and workspace from local directory
@@ -115,65 +118,67 @@ paths:
               schema:
                 $ref: "#/components/schemas/UserErrors"
 
-  /repo/{RepoID}/workspaces:
-    parameters:
-      - name: RepoID
-        required: true
-        in: path
-        schema:
-          type: string
-    get:
-      summary: Get workspaces by repo ID
-      operationId: "GetWorkspaces"
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties:
-                  $ref: "#/components/schemas/WorkspaceConfiguration"
-  /repo/{RepoID}/workspace/{WorkspaceID}:
-    parameters:
-      - name: RepoID
-        required: true
-        in: path
-        schema:
-          type: string
-      - name: WorkspaceID
-        required: true
-        in: path
-        schema:
-          type: string
-    get:
-      summary: Get workspace by ID
-      operationId: "GetWorkspace"
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/WorkspaceConfiguration"
-    post:
-      summary: Add or update a cloned workspace
-      operationId: "AddOrUpdateClonedWorkspace"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/WorkspaceConfiguration"
-      responses:
-        "200":
-          description: OK
-    delete:
-      summary: Remove a cloned workspace
-      operationId: "RemoveClonedWorkspace"
-      responses:
-        "200":
-          description: OK
+
+
+#   /repo/{RepoID}/workspaces:
+#     parameters:
+#       - name: RepoID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#     get:
+#       summary: Get workspaces by repo ID
+#       operationId: "GetWorkspaces"
+#       responses:
+#         "200":
+#           description: OK
+#           content:
+#             application/json:
+#               schema:
+#                 type: object
+#                 additionalProperties:
+#                   $ref: "#/components/schemas/WorkspaceConfiguration"
+#   /repo/{RepoID}/workspace/{WorkspaceID}:
+#     parameters:
+#       - name: RepoID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#       - name: WorkspaceID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#     get:
+#       summary: Get workspace by ID
+#       operationId: "GetWorkspace"
+#       responses:
+#         "200":
+#           description: OK
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: "#/components/schemas/WorkspaceConfiguration"
+#     post:
+#       summary: Add or update a cloned workspace
+#       operationId: "AddOrUpdateClonedWorkspace"
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               $ref: "#/components/schemas/WorkspaceConfiguration"
+#       responses:
+#         "200":
+#           description: OK
+#     delete:
+#       summary: Remove a cloned workspace
+#       operationId: "RemoveClonedWorkspace"
+#       responses:
+#         "200":
+#           description: OK
   /repo/{RepoID}/workspace/{WorkspaceID}/sync:
     parameters:
       - name: RepoID
@@ -227,27 +232,27 @@ paths:
                 $ref: "#/components/schemas/WorkspaceSyncProgress"
         "412":
           description: Failed to get sync progress due to initialization or internal error state
-  /workspace/{WorkspaceID}/scan:
-    parameters:
-      - name: WorkspaceID
-        required: true
-        in: path
-        schema:
-          type: string
-    post:
-      summary: Scan workspace for changes
-      operationId: "NotifyScanRequired"
-      responses:
-        "204":
-          description: Accepted
-        "404":
-          description: Workspace with the input parameters not found
-        "503":
-          description: Workspace has errors and cannot be scanned
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
+#   /workspace/{WorkspaceID}/scan:
+#     parameters:
+#       - name: WorkspaceID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#     post:
+#       summary: Scan workspace for changes
+#       operationId: "NotifyScanRequired"
+#       responses:
+#         "204":
+#           description: Accepted
+#         "404":
+#           description: Workspace with the input parameters not found
+#         "503":
+#           description: Workspace has errors and cannot be scanned
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: "#/components/schemas/Error"
   /repo/{RepoID}/workspace/{WorkspaceID}/files/status:
     parameters:
       - name: RepoID
@@ -279,195 +284,195 @@ paths:
           description: User error
         "412":
           description: Failed to get file sync status due to initialization or internal error state
-  /repo/{RepoID}/workspace/{WorkspaceID}/debug/dump:
-    parameters:
-      - name: RepoID
-        required: true
-        in: path
-        schema:
-          type: string
-      - name: WorkspaceID
-        required: true
-        in: path
-        schema:
-          type: string
-    get:
-      summary: Get workspace structure dump
-      operationId: "WorkspaceStructureDump"
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                description: Type is complicated, keeping this a client internal for now
-                type: string
-                format: binary
-  /workspace/{WorkspaceID}/sync/pause:
-    parameters:
-      - name: WorkspaceID
-        required: true
-        in: path
-        schema:
-          type: string
-    post:
-      summary: Pause workspace sync
-      operationId: "PauseWorkspaceSync"
-      responses:
-        "200":
-          description: OK
-        "404":
-            description: Workspace with the input parameters not found
-        "409":
-            description: Workspace is already paused
-  /workspace/{WorkspaceID}/sync/resume:
-    parameters:
-      - name: WorkspaceID
-        required: true
-        in: path
-        schema:
-          type: string
-    post:
-      summary: Resume workspace sync
-      operationId: "ResumeWorkspaceSync"
-      responses:
-        "200":
-          description: OK
-        "404":
-          description: Workspace with the input parameters not found
-        "409":
-            description: Workspace is already running
-  /repo/{RepoID}/clone:
-    parameters:
-      - name: RepoID
-        required: true
-        in: path
-        schema:
-          type: string
-    post:
-      summary: Clone repository into a local workspace
-      operationId: "CloneRepository"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CloneRepo"
-      responses:
-        "400":
-          description: User error
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/UserErrors"
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                  $ref: "#/components/schemas/WorkspaceConfiguration"
-  /support/bundle:
-    post:
-        summary: Generate support bundle for the agent
-        operationId: "GenerateSupportBundle"
-        requestBody:
-          required: true
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SupportBundle"
-        responses:
-            "200":
-                description: OK
-                content:
-                    application/json:
-                      schema:
-                        $ref: "#/components/schemas/SupportBundleResponse"
+#   /repo/{RepoID}/workspace/{WorkspaceID}/debug/dump:
+#     parameters:
+#       - name: RepoID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#       - name: WorkspaceID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#     get:
+#       summary: Get workspace structure dump
+#       operationId: "WorkspaceStructureDump"
+#       responses:
+#         "200":
+#           description: OK
+#           content:
+#             application/json:
+#               schema:
+#                 description: Type is complicated, keeping this a client internal for now
+#                 type: string
+#                 format: binary
+#   /workspace/{WorkspaceID}/sync/pause:
+#     parameters:
+#       - name: WorkspaceID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#     post:
+#       summary: Pause workspace sync
+#       operationId: "PauseWorkspaceSync"
+#       responses:
+#         "200":
+#           description: OK
+#         "404":
+#             description: Workspace with the input parameters not found
+#         "409":
+#             description: Workspace is already paused
+#   /workspace/{WorkspaceID}/sync/resume:
+#     parameters:
+#       - name: WorkspaceID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#     post:
+#       summary: Resume workspace sync
+#       operationId: "ResumeWorkspaceSync"
+#       responses:
+#         "200":
+#           description: OK
+#         "404":
+#           description: Workspace with the input parameters not found
+#         "409":
+#             description: Workspace is already running
+#   /repo/{RepoID}/clone:
+#     parameters:
+#       - name: RepoID
+#         required: true
+#         in: path
+#         schema:
+#           type: string
+#     post:
+#       summary: Clone repository into a local workspace
+#       operationId: "CloneRepository"
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               $ref: "#/components/schemas/CloneRepo"
+#       responses:
+#         "400":
+#           description: User error
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: "#/components/schemas/UserErrors"
+#         "200":
+#           description: OK
+#           content:
+#             application/json:
+#               schema:
+#                   $ref: "#/components/schemas/WorkspaceConfiguration"
+#   /support/bundle:
+#     post:
+#         summary: Generate support bundle for the agent
+#         operationId: "GenerateSupportBundle"
+#         requestBody:
+#           required: true
+#           content:
+#             application/json:
+#               schema:
+#                 $ref: "#/components/schemas/SupportBundle"
+#         responses:
+#             "200":
+#                 description: OK
+#                 content:
+#                     application/json:
+#                       schema:
+#                         $ref: "#/components/schemas/SupportBundleResponse"
 
-  /notify/auth:
-    post:
-      summary: Notify of an authentication event
-      operationId: "NotifyOfAuthEvent"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AuthNotification"
-      responses:
-        "200":
-          description: OK
-  /utils/list_dir:
-    post:
-      summary: List directory paths to suggest candidates for cloning / init repos
-      operationId: ListDir
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                paths:
-                  type: array
-                  items:
-                    type: string
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  paths:
-                    type: array
-                    items:
-                      type: string
-                required:
-                  - paths
-  /utils/open_workspace:
-    post:
-      summary: Open locally cloned workspace with finder / explorer (or sub path underneath it)
-      operationId: OpenLocalWorkspace
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                workspaceId:
-                  description: ID of the locally cloned workspace we want to open
-                  type: string
-                subPath:
-                  description: Optional path to item under the locally cloned workspace
-                  type: string
-                selected:
-                  description: Whether to select the opened item in finder / explorer
-                  type: boolean
-              required:
-                - workspaceId
-      responses:
-        "200":
-          description: OK
-        "404":
-          description: cloned workspace with the input parameters not found
-  /utils/open_workspace_file:
-    post:
-      summary: Open a file inside a locally cloned workspace with it's default application
-      operationId: OpenLocalWorkspaceFile
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/OpenWorkspaceFileParams"
-      responses:
-        "200":
-          description: OK
-        "404":
-          description: file with the provided path was not found
+#   /notify/auth:
+#     post:
+#       summary: Notify of an authentication event
+#       operationId: "NotifyOfAuthEvent"
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               $ref: "#/components/schemas/AuthNotification"
+#       responses:
+#         "200":
+#           description: OK
+#   /utils/list_dir:
+#     post:
+#       summary: List directory paths to suggest candidates for cloning / init repos
+#       operationId: ListDir
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               type: object
+#               properties:
+#                 paths:
+#                   type: array
+#                   items:
+#                     type: string
+#       responses:
+#         "200":
+#           description: OK
+#           content:
+#             application/json:
+#               schema:
+#                 type: object
+#                 properties:
+#                   paths:
+#                     type: array
+#                     items:
+#                       type: string
+#                 required:
+#                   - paths
+#   /utils/open_workspace:
+#     post:
+#       summary: Open locally cloned workspace with finder / explorer (or sub path underneath it)
+#       operationId: OpenLocalWorkspace
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               type: object
+#               properties:
+#                 workspaceId:
+#                   description: ID of the locally cloned workspace we want to open
+#                   type: string
+#                 subPath:
+#                   description: Optional path to item under the locally cloned workspace
+#                   type: string
+#                 selected:
+#                   description: Whether to select the opened item in finder / explorer
+#                   type: boolean
+#               required:
+#                 - workspaceId
+#       responses:
+#         "200":
+#           description: OK
+#         "404":
+#           description: cloned workspace with the input parameters not found
+#   /utils/open_workspace_file:
+#     post:
+#       summary: Open a file inside a locally cloned workspace with it's default application
+#       operationId: OpenLocalWorkspaceFile
+#       requestBody:
+#         required: true
+#         content:
+#           application/json:
+#             schema:
+#               $ref: "#/components/schemas/OpenWorkspaceFileParams"
+#       responses:
+#         "200":
+#           description: OK
+#         "404":
+#           description: file with the provided path was not found
 
 
 components:
@@ -511,11 +516,11 @@ components:
             - CommitID
             - Paused
             - ShouldDownload
-    LoadDirection:
-      type: string
-      enum:
-        - Outbound
-        - Inbound
+    # LoadDirection:
+    #   type: string
+    #   enum:
+    #     - Outbound
+    #     - Inbound
     ProgressStatus:
       type: object
       properties:
@@ -661,27 +666,27 @@ components:
       required:
         - Name
         - Path
-    SupportBundle:
-        type: object
-        properties:
-          RepoID:
-            type: string
-          Message:
-            type: string
-          UrgencyLevel:
-            description: "The urgency level of the issue; 0 - Not Set, 1- Low, 2 - Normal, 3 - High, 4 - Urgent"
-            type: integer
-            enum: [ 0, 1, 2, 3, 4 ]
-            default: 0
-        required:
-          - Message
-    SupportBundleResponse:
-      type: object
-      properties:
-        ResultPath:
-          type: string
-      required:
-        - ResultPath
+#     SupportBundle:
+#         type: object
+#         properties:
+#           RepoID:
+#             type: string
+#           Message:
+#             type: string
+#           UrgencyLevel:
+#             description: "The urgency level of the issue; 0 - Not Set, 1- Low, 2 - Normal, 3 - High, 4 - Urgent"
+#             type: integer
+#             enum: [ 0, 1, 2, 3, 4 ]
+#             default: 0
+#         required:
+#           - Message
+#     SupportBundleResponse:
+#       type: object
+#       properties:
+#         ResultPath:
+#           type: string
+#       required:
+#         - ResultPath
     PathList:
       description: A list of paths
       type: array

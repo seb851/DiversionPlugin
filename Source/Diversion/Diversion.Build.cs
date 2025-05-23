@@ -8,7 +8,7 @@ public class Diversion : ModuleRules
 	{
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-        IWYUSupport = IWYUSupport.Full; 
+        IWYUSupport = IWYUSupport.Full;
 
         PrivateDependencyModuleNames.AddRange(
 			new string[] {
@@ -19,15 +19,16 @@ public class Diversion : ModuleRules
                 "UnrealEd",
                 "Projects",
                 "SourceControl",
-                "AgentAPI",
-                "CoreAPI",
-                "HTTP",
-                "Json",
                 "DesktopWidgets",
                 "CoreUObject",
                 "Engine",
-                "Common"
-			}
+                "Json",
+                // Diversion dependencies
+                "Common",
+                "DiversionHttp",
+                "AgentAPI",
+                "CoreAPI"
+            }
         );
 
         UnsafeTypeCastWarningLevel = WarningLevel.Error;

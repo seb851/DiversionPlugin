@@ -1,80 +1,93 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "ISourceControlModule.h"
-
-#include "SyncApiCall.h"
 #include "DiversionUtils.h"
 #include "DiversionCommand.h"
-#include "DiversionOperations.h"
-
-#include "OpenAPIRepositoryManipulationApi.h"
-#include "OpenAPIRepositoryManipulationApiOperations.h"
+#include "DiversionModule.h"
 
 
-using namespace CoreAPI;
-
-using Download = OpenAPIRepositoryManipulationApi;
-
-class FSyncDownloadBlob;
-using FDownloadBlobSyncAPI = TSyncApiCall<
-	FSyncDownloadBlob,
-	Download::SrcHandlersv2FilesGetBlobRequest,
-	Download::SrcHandlersv2FilesGetBlobResponse,
-	Download::FSrcHandlersv2FilesGetBlobDelegate,
-	Download,
-	&Download::SrcHandlersv2FilesGetBlob,
-	AuthorizedCall,
-	// Output parameters
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>&, /*InfoMessages*/
-	FString& /*OutRedirectUrl*/>;
-
-
-class FSyncDownloadBlob final : public FDownloadBlobSyncAPI {
-	friend FDownloadBlobSyncAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, 
-		FString& OutRedirectUrl, const Download::SrcHandlersv2FilesGetBlobResponse& Response);
-};
-REGISTER_PARSE_TYPE(FSyncDownloadBlob);
-
-bool FSyncDownloadBlob::ResponseImplementation(TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages,
-	FString& OutRedirectUrl, const Download::SrcHandlersv2FilesGetBlobResponse& Response) {
-	if (!Response.IsSuccessful()) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
-		return false;
-	}
-if (Response.GetHttpResponseCode() == EHttpResponseCodes::NoContent)
-	{
-		OutRedirectUrl = Response.GetHttpResponse()->GetHeader("location");
-		OutInfoMessages.Add("Received redirection URL for file");
-		return false;
-	}
-	
-	OutInfoMessages.Add("File was succesfully downloaded");
-	return true;
-}
+using namespace Diversion::CoreAPI;
 
 
 bool DiversionUtils::DownloadBlob(TArray<FString>& OutInfoMessages,
 	TArray<FString>& OutErrorMessages, const FString& InRefId, const FString& InOutputFilePath, 
 	const FString& InFilePath, WorkspaceInfo InWsInfo)
 {
-	auto Request = Download::SrcHandlersv2FilesGetBlobRequest();
-	Request.RepoId = InWsInfo.RepoID;
-	Request.RefId = InRefId;
-	Request.Path = ConvertFullPathToRelative(InFilePath, InWsInfo.GetPath());
-	Request.ResponseFilePath = InOutputFilePath;
+	FString RedirectUrl = "";
+	auto ErrorResponse = RepositoryManipulationApi::Fsrc_handlersv2_files_getBlobDelegate::Bind(
+		[&]() {
+			return false;
+		}
+	);
 
-	FString RedirectUrl;
-	auto& DownloadApiCall = FDiversionModule::Get().GetApiCall<FSyncDownloadBlob>();
-	auto Success = DownloadApiCall.CallAPI(Request, InWsInfo.AccountID, OutInfoMessages, OutErrorMessages, RedirectUrl);
-	
-	if (!Success && !RedirectUrl.IsEmpty())
+	auto VariantResponse = RepositoryManipulationApi::Fsrc_handlersv2_files_getBlobDelegate::Bind(
+		[&](const TVariant<TSharedPtr<HttpContent>, void*>& Variant, int StatusCode, TMap<FString, FString> Headers) {
+			switch (StatusCode) {
+				case 200:
+				{
+					// File was downloaded
+					if (!Variant.IsType<TSharedPtr<HttpContent>>()) {
+						// Unexpected response type
+						OutErrorMessages.Add("Unexpected response type");
+						return false;
+					}
+					// Write the file to disk
+					auto Value = Variant.Get<TSharedPtr<HttpContent>>();
+					Value->WriteToFile(InOutputFilePath);
+					OutInfoMessages.Add("File was succesfully downloaded");
+					return true;
+				}
+				case 204:
+				{
+					// No content - look for the location header for redirection URL
+					if (FString* location = Headers.Find("Location")) {
+						RedirectUrl = *location;
+						OutInfoMessages.Add("Received redirection URL for file");
+						return true;
+					}
+					return false;
+				}
+				default:
+				{
+					// Unexpected response type
+					OutErrorMessages.Add("Unexpected response type");
+					return false;
+				}
+			}
+		}
+	);
+
+	bool Success = FDiversionModule::Get().RepositoryManipulationAPIRequestManager->SrcHandlersv2FilesGetBlob(InWsInfo.RepoID, 
+		InRefId, ConvertFullPathToRelative(InFilePath, InWsInfo.GetPath()),
+		FDiversionModule::Get().GetAccessToken(InWsInfo.AccountID), {}, 5, 120).HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
+
+	if (!RedirectUrl.IsEmpty())
 	{
-		Success = DownloadFileFromURL(RedirectUrl, InOutputFilePath);
+		// If the redirect URL was populated it means we need to download the file from there
+
+		// Download the file from the redirect URL
+		DiversionHttp::FHttpRequestManager FileDownloaderRequestManager(RedirectUrl);
+		FString RequestPath = DiversionHttp::GetPathFromUrl(RedirectUrl);
+
+		auto Response = FileDownloaderRequestManager.DownloadFileFromUrl(InOutputFilePath, RequestPath,
+			FString(), {}, 5, 120);
+		if (Response.Error.IsSet()) {
+			OutErrorMessages.Add(Response.Error.GetValue());
+			UE_LOG(LogSourceControl, Error, TEXT("Error downloading file: %s"), *Response.Error.GetValue());
+			return false;
+		}
+
+		if (Response.ResponseCode >= 400) {
+			OutErrorMessages.Add(Response.Contents);
+			UE_LOG(LogSourceControl, Error, TEXT("Error downloading file: %s"), *Response.Contents);
+			return false;
+		}
+
+		if (Response.Contents.Equals(InOutputFilePath)) {
+			OutInfoMessages.Add("File was downloaded succesfully");
+			Success = true;
+		}
 	}
+
 	return Success;
 }
 

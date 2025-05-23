@@ -11,12 +11,15 @@
 
 #include "HttpModule.h"
 #include "DiversionState.h"
+#include "CoreAPI/Public/Merge.h"
 
-template<typename T>
-struct TypeParseTraits;
 
-#define REGISTER_PARSE_TYPE(X) template <> struct TypeParseTraits<X> \
-{ static const char* name; } ; const char* TypeParseTraits<X>::name = #X
+
+const FString DIVERSION_API_HOST = TEXT("api.diversion.dev");
+const FString DIVERSION_API_PORT = TEXT("443");
+
+const FString AGENT_API_HOST = TEXT("127.0.0.1");
+const FString AGENT_API_PORT = TEXT("8797");
 
 
 class FDiversionState;
@@ -28,7 +31,6 @@ DECLARE_DELEGATE_RetVal(bool, WaitForConditionPredicate)
 
 namespace DiversionUtils
 {
-
 	namespace UPackageUtils {
 		/**
 		* Get the package object from a file absolute path
@@ -44,6 +46,29 @@ namespace DiversionUtils
 		*/
 		bool IsPackageOpenedInEditor(const FString& PackageName);
 
+		/**
+		 * Wrap UE package saving mechanism
+		 * @param Package 
+		 * @return true if the package was saved successfully
+		 */
+		bool SavePackage(UPackage* Package);
+
+		/**
+		 * Closing all editor tabs for a package
+		 * @param Package 
+		 */
+		void ClosePackageEditor(UPackage* Package);
+
+		/**
+		 * Dicard all unsaved changes for a package
+		 * @param Package 
+		 */
+		void DiscardUnsavedChanges(UPackage* Package);
+
+		bool BackupUnsavedChanges(UPackage* Package);
+		
+		bool MakeSimpleOSCopyPackageBackup(const FString& OriginalFileFullPath, const FString& TargetBackupFolderPath);
+		
 	}
 
 enum class EDiversionWsSyncStatus {
@@ -97,8 +122,6 @@ FString ConvertRelativePathToDiversionFull(const FString& InPath, FString RootDi
 
 FString RefToOrdinalId(const FString& RefId);
 
-bool HttpTick(double& LastHttpTickTime);
-
 void ShowErrorNotification(const FText& ErrorMessage);
 
 bool IsDiversionInstalled();
@@ -117,20 +140,28 @@ TSet<FString> GetPathsCommonPrefixes(const TArray<FString>& InPaths, const FStri
 
 FString FindCommonAncestorDirectory(const TArray<FString>& InPaths);
 
-void WaitForHttpRequest(const double InMaxWaitingTimeoutSeconds, const FHttpRequestPtr InRequest, const FString& InAPICallName, const double InLogIntervalSeconds);
-
 FString GetStackTrace();
 
 bool DiversionValidityCheck(bool InCondition, FString InErrorDescription, const FString& AccountId, bool InSilent = false);
 
+#define AUTHORIZATION_HEADER_KEY "Authorization"
+#define APP_VERSION_HEADER_KEY "X-DV-App-Version"
+#define APP_NAME_HEADER_KEY "X-DV-App-Name"
+#define CORRELATION_ID_HEADER_KEY "X-Sentry-Correlation-ID"
+	
+TMap<FString, FString> GetDiversionHeaders();
+	
 // API calls 
 bool GetWorkspaceConfigByPath(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FString& InPath);
 bool SendAnalyticsEvent(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const TMap<
                         FString, FString>& InProperties);
 bool RunAgentHealthCheck(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
 bool AgentInSync(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
-bool GetConflictedFiles(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
-bool RunGetMerges(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
+bool GetConflictedFiles(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages,
+	TArray<FString>& OutErrorMessages, TMap<FString, FDiversionResolveInfo>& OutConflicts,
+	TArray<Diversion::CoreAPI::Model::Merge>& OutWorkspaceMergesList, TArray<Diversion::CoreAPI::Model::Merge>& OutBranchMergesList);
+bool RunGetMerges(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages,
+	TArray<FString>& OutErrorMessages, TArray<Diversion::CoreAPI::Model::Merge>& OutMerges);
 bool RunUpdateStatus(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, bool WaitForSync = true);
 bool RunCommit(FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FString& InDescription, bool WaitForSync = true);
 bool RunReset(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
@@ -146,8 +177,11 @@ bool DownloadFileFromURL(const FString& Url, const FString& SavePath);
 bool DownloadBlob(TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FString& InRefId, const FString& InOutputFilePath, const FString& InFilePath, WorkspaceInfo InWsInfo);
 bool RunRepoInit(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FString& InRepoRootPath, const FString& InRepoName);
 bool GetPotentialFileClashes(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, TMap<FString, TArray<EDiversionPotentialClashInfo>>& OutPotentialClashes, bool& OutRecurseCall);
-bool WorkspaceSyncProgress(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
+bool GetWorkspaceSyncProgress(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
 bool NotifyAgentSyncRequired(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
+bool UpdateWorkspace(FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages);
+bool GetRemoteRepos(FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, bool InOwnedOnly, TArray<FString>& OutReposList);
+bool GetAllLocalWorkspaces(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, TArray<WorkspaceInfo>& OutLocalWorkspaces);
 
 // Since this API doesn't affect the state of the Provider and doesn't return any value, it can live without the context of a FDiversionCommand
 bool SendErrorToBE(const FString& AccountID, const FString& InErrorMessageToReport, const FString& InStackTrace);

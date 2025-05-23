@@ -1,23 +1,30 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
 #include "SDiversionSettings.h"
+
+// Widgets
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Input/SDirectoryPicker.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Framework/Notifications/NotificationManager.h"
+
+// Misc
 #include "Misc/App.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Layout/SSeparator.h"
-#include "Widgets/Input/SMultiLineEditableTextBox.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "SourceControlOperations.h"
-#include "DiversionModule.h"
-#include "DiversionUtils.h"
-#include "Widgets/Input/SDirectoryPicker.h"
-#include "DiversionOperations.h"
 
+// Diversion
+#include "DiversionUtils.h"
+#include "DiversionModule.h"
+#include "DiversionProvider.h"
+#include "DiversionOperations.h"
+#include "SourceControlOperations.h"
+#include "CustomWidgets/NotificationManager.h"
 
 #define LOCTEXT_NAMESPACE "SDiversionSettings"
 
@@ -54,6 +61,48 @@ TSharedRef<SWidget> SDiversionSettings::DiversionNotInstalledWidget()
 		];
 }
 
+TSharedRef<SWidget> SDiversionSettings::RepoWithSameNameExistsWidget()
+{
+	const FText RepoWithSameNameExists = LOCTEXT("DiversionRepoWithSameNameExists", "You already have a repository with the same name.\n The Unreal plugin cannot initialize.\n Please refer to the documentation for available options");
+	const FText DiversionLearnMore = LOCTEXT("DiversionRepoWithSameNameExists_LearnMore", "Learn More");
+	const FText DiversionLearnMore_Tooltip = LOCTEXT("DiversionRepoWithSameNameExists_LearnMore_Tooltip", "View the documentation to understand and resolve this issue.");
+
+	return SNew(SVerticalBox)
+		.Visibility_Lambda(
+			[this] {return SettingCurrentScreen() == RepoWithSameNameAlreadyExists ? EVisibility::Visible : EVisibility::Collapsed; }
+		)
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(2.0f)
+		.VAlign(VAlign_Center)
+		[
+			SNew(SBorder)
+			.BorderBackgroundColor(FLinearColor(1.0f, 0.72f, 0.0f, 1.0f))
+			.Padding(10.0f)
+			[
+				SNew(STextBlock)
+					.Text(RepoWithSameNameExists)
+			]	
+		]
+		+ SVerticalBox::Slot()
+		.FillHeight(2.5f)
+		.Padding(4.0f)
+		.VAlign(VAlign_Center)
+		[
+			SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				[
+					SNew(SButton)
+						.Text(DiversionLearnMore)
+						.ToolTipText(DiversionLearnMore_Tooltip)
+						.OnClicked(this, &SDiversionSettings::OnClickedOpenDiversionRepoWithSameNameExists)
+						.HAlign(HAlign_Center)
+						.ContentPadding(6)
+				]
+		];
+}
+
 TSharedRef<SWidget> SDiversionSettings::DiversionRunAgentWidget()
 {
 	const FText DiversionRunAgent = LOCTEXT("DiversionRunAgent", "Diversion agent is not running. Please start the agent to use this plugin.");
@@ -61,7 +110,7 @@ TSharedRef<SWidget> SDiversionSettings::DiversionRunAgentWidget()
 
 	return SNew(SVerticalBox)
 		.Visibility_Lambda(
-			[] {return SettingCurrentScreen() == StartAgent ? EVisibility::Visible : EVisibility::Collapsed; }
+			[this] {return SettingCurrentScreen() == StartAgent ? EVisibility::Visible : EVisibility::Collapsed; }
 		)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -90,7 +139,7 @@ TSharedRef<SWidget> SDiversionSettings::ShowVersionWidget()
 	
 	return SNew(SHorizontalBox)
 		.Visibility_Lambda(
-			[] {return SettingCurrentScreen() != StartAgent ? EVisibility::Visible : EVisibility::Collapsed; }
+			[this] {return SettingCurrentScreen() != StartAgent ? EVisibility::Visible : EVisibility::Collapsed; }
 		)
 		+ SHorizontalBox::Slot()
 		.FillWidth(1.0f)
@@ -112,7 +161,7 @@ TSharedRef<SWidget> SDiversionSettings::DiversionExistingRepoWidget(const FText&
 {
 	return SNew(SVerticalBox)
 		.Visibility_Lambda(
-				[] {return SettingCurrentScreen() == RepoInitialized ? EVisibility::Visible : EVisibility::Collapsed; }
+				[this] {return SettingCurrentScreen() == RepoInitialized ? EVisibility::Visible : EVisibility::Collapsed; }
 			)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -151,7 +200,7 @@ TSharedRef<SWidget> SDiversionSettings::DiversionInitializeRepoWidget(const FTex
 {
 	return SNew(SVerticalBox)
 		.Visibility_Lambda(
-			[] {return SettingCurrentScreen() == RepoCreation ? EVisibility::Visible : EVisibility::Collapsed; }
+			[this] {return SettingCurrentScreen() == RepoCreation ? EVisibility::Visible : EVisibility::Collapsed; }
 		)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -180,46 +229,11 @@ TSharedRef<SWidget> SDiversionSettings::DiversionInitializeRepoWidget(const FTex
 					.ToolTipText(RepositoryRootLabel_Tooltip)
 			]
 		]
-		//+ SVerticalBox::Slot()
-		//.AutoHeight()
-		//.Padding(2.0f)
-		//.VAlign(VAlign_Center)[
-		//	AddInitialCommit()
-		//]
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(2.0f)
 		.VAlign(VAlign_Center)[
 			AddInitializeButton()
-		];
-}
-
-TSharedRef<SWidget> SDiversionSettings::AddInitialCommit()
-{
-	const FText InitialDiversionCommit_Tooltip = LOCTEXT("InitialDiversionCommit_Tooltip", "Create an initial commit");
-	const FText InitialDiversionCommit = LOCTEXT("InitialDiversionCommit", "Create an initial commit");
-	const FText InitialCommitMessage_Tooltip = LOCTEXT("InitialCommitMessage_Tooltip", "Message of initial commit");
-
-	return SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot()
-		[
-			SNew(SCheckBox)
-				.ForegroundColor(FSlateColor::UseForeground())
-				.ToolTipText(InitialDiversionCommit_Tooltip)
-				.IsChecked(ECheckBoxState::Checked)
-				.OnCheckStateChanged(this, &SDiversionSettings::OnCheckedInitialCommit)
-				[
-					SNew(STextBlock)
-						.Text(InitialDiversionCommit)
-				]
-		]
-		+ SHorizontalBox::Slot()
-		.FillWidth(1.85f)
-		[
-			SNew(SMultiLineEditableTextBox)
-				.Text(this, &SDiversionSettings::GetInitialCommitMessage)
-				.ToolTipText(InitialCommitMessage_Tooltip)
-				.OnTextCommitted(this, &SDiversionSettings::OnInitialCommitMessageCommited)
 		];
 }
 
@@ -243,11 +257,17 @@ TSharedRef<SWidget> SDiversionSettings::AddInitializeButton()
 
 SDiversionSettings::SettingsState SDiversionSettings::SettingCurrentScreen()
 {
-	auto& Provider = FDiversionModule::Get().GetProvider();
-	if (!Provider.IsAgentAlive(EConcurrency::Asynchronous, false))
+	// Avoid any computational heavy/API Calls here!! this is called 
+	if (!SourceControlProvider->IsAgentAlive(EConcurrency::Asynchronous, false)) {
 		return SettingsState::StartAgent;
-	if (!Provider.IsEnabled())
+	}
+	if (!SourceControlProvider->IsWorkspaceExistsInPath(RepoName, RepoPath, EConcurrency::Asynchronous, false)) {
+		// Check this only if the repo is not initialized
+		if (SourceControlProvider->IsRepoWithSameNameExists(RepoName, EConcurrency::Asynchronous, false)) {
+			return SettingsState::RepoWithSameNameAlreadyExists;
+		}
 		return SettingsState::RepoCreation;
+	}
 	return SettingsState::RepoInitialized;
 }
 
@@ -270,6 +290,9 @@ TSharedRef<SWidget> SDiversionSettings::MakeSettingsPanel()
 			ShowVersionWidget()
 		];
 
+	auto RepoWithSameNameScreen = RepoWithSameNameExistsWidget();
+	MainSettingsBox->AddSlot()[RepoWithSameNameScreen];
+
 	auto RunAgentScreen = DiversionRunAgentWidget();
 	MainSettingsBox->AddSlot()[RunAgentScreen];
 
@@ -278,6 +301,7 @@ TSharedRef<SWidget> SDiversionSettings::MakeSettingsPanel()
 
 	auto ExistingRepoScreen = DiversionExistingRepoWidget(RepositoryRootLabel, RepositoryRootLabel_Tooltip);
 	MainSettingsBox->AddSlot()[ExistingRepoScreen];
+
 	auto InitializeRepoScreen = DiversionInitializeRepoWidget(RepositoryRootLabel, RepositoryRootLabel_Tooltip);
 	MainSettingsBox->AddSlot()[InitializeRepoScreen];
 
@@ -286,6 +310,20 @@ TSharedRef<SWidget> SDiversionSettings::MakeSettingsPanel()
 
 void SDiversionSettings::Construct(const FArguments& InArgs)
 {
+	UE_LOG(LogTemp, Log, TEXT("SDiversionSettings::Construct"));
+	
+
+	// TODO: set this to none so the user can change it?
+	// Set default repo path and name
+	RepoPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	OnProjectPathPicked(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()));
+	
+	// This function assume that the Diversion Module was already loaded
+	SourceControlProvider = &FDiversionModule::Get().GetProvider();
+	// Needed for state data to decide which connect screen to show the user
+	SourceControlProvider->IsWorkspaceExistsInPath(RepoName, RepoPath, EConcurrency::Synchronous, true);
+	SourceControlProvider->IsRepoWithSameNameExists(RepoName, EConcurrency::Synchronous, true);
+
 	ChildSlot [ MakeSettingsPanel() ];
 }
 
@@ -296,110 +334,120 @@ SDiversionSettings::~SDiversionSettings()
 
 FText SDiversionSettings::GetVersions() const
 {
-	FDiversionProvider& Provider = FDiversionModule::Get().GetProvider();
-	return FText::FromString(Provider.GetDiversionVersion().ToString() + TEXT(" (plugin v") + Provider.GetPluginVersion() + TEXT(")"));
+	return FText::FromString(SourceControlProvider->GetDiversionVersion().ToString() + TEXT(" (plugin v") + SourceControlProvider->GetPluginVersion() + TEXT(")"));
 }
 
 FText SDiversionSettings::GetPathToWorkspaceRoot() const
 {
-	FDiversionModule& Diversion = FDiversionModule::Get();
-	return FText::FromString(Diversion.GetProvider().GetPathToWorkspaceRoot());
+	return FText::FromString(SourceControlProvider->GetPathToWorkspaceRoot());
 }
 
 FReply SDiversionSettings::OnClickedInitializeDiversionRepository()
 {
-	FDiversionModule& Diversion = FDiversionModule::Get();
-
 	auto SendAnalyticsOperation = ISourceControlOperation::Create<FSendAnalytics>();
 	SendAnalyticsOperation->SetEventName(FText::FromString("UE Plugin Init"));
-	Diversion.GetProvider().Execute(SendAnalyticsOperation, nullptr, TArray<FString>(), EConcurrency::Asynchronous);
+	SourceControlProvider->Execute(SendAnalyticsOperation, nullptr, TArray<FString>(), EConcurrency::Asynchronous);
 
-	const FString& PathToDiversionBinary = Diversion.AccessSettings().GetBinaryPath();
 	const FString PathToProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	TArray<FString> InfoMessages;
-	// TArray<FString> ErrorMessages;
-
-	// 1.a. Synchronous (very quick) "dv init" operation: initialize a Diversion local repository with a .diversion/ subdirectory
-	// Force init flags - a map with the -f flag to force the initialization of the repository with value of empty string
-	TMap<FString, FString> forceFlags = { {TEXT("f"), TEXT("")} };
-	// Escaping to support paths with spaces
-	auto EscapedRepoPath = TEXT("\"") + RepoPath + TEXT("\"");
 
 	// Make sure the provided RepoPath from options contains(is parent of) the project directory
 	if (!PathToProjectDir.StartsWith(RepoPath))
 	{
 		// TODO: Use endpoint to make sure we can initialize the repository in this path?
-		const FText NotificationText = FText::Format(LOCTEXT("InvalidRepoPath", "Provided repository path is not a parent of the current project: {0}. Please choose a dir that is a parent of the project dir (or the project dir itself)"), FText::FromString(RepoPath));
+		const FText NotificationText = FText::Format(LOCTEXT("InvalidRepoPath", "Provided repository path is not a parent of the current project: {0}."
+			"Please choose a dir that is a parent of the project dir (or the project dir itself)"), FText::FromString(RepoPath));
 		DiversionUtils::ShowErrorNotification(NotificationText);
 		return FReply::Handled();
 	}
 
-	#if PLATFORM_WINDOWS
-	FString FullRepoPath = FPaths::ConvertRelativePathToFull(RepoPath).Replace(TEXT("/"), TEXT("\\"));
-	#elif PLATFORM_LINUX || PLATFORM_MAC
-	FString FullRepoPath = FPaths::ConvertRelativePathToFull(RepoPath);
-	#endif
-	if(FullRepoPath.EndsWith(TEXT("\\")) || FullRepoPath.EndsWith(TEXT("/")))
-	{
-		FullRepoPath = FullRepoPath.LeftChop(1);
-	}
-	const FString RepoName = FPaths::GetPathLeaf(FullRepoPath);
-
 	auto InitRepoOperation = ISourceControlOperation::Create<FInitRepo>();
 	InitRepoOperation->SetRepoName(RepoName);
-	InitRepoOperation->SetRepoPath(FullRepoPath);
+	InitRepoOperation->SetRepoPath(RepoPath);
 
-	Diversion.GetProvider().Execute(InitRepoOperation, nullptr, TArray<FString>(), EConcurrency::Synchronous,
+	SourceControlProvider->Execute(InitRepoOperation, nullptr, TArray<FString>(), EConcurrency::Synchronous,
 		FSourceControlOperationComplete::CreateSP(this, &SDiversionSettings::OnSourceControlOperationComplete));
 
-	Diversion.GetProvider().GetDiversionVersion(EConcurrency::Synchronous, true);
-	Diversion.GetProvider().GetWsInfo(EConcurrency::Synchronous, true);
+	SourceControlProvider->GetDiversionVersion(EConcurrency::Synchronous, true);
+	SourceControlProvider->GetWsInfo(EConcurrency::Synchronous, true);
 
+	bool bInitializedSuccessfuly = SourceControlProvider->IsWorkspaceExistsInPath(RepoName, RepoPath, EConcurrency::Synchronous, true);
 	// Check the new repository status to enable connection (branch, user e-mail)
-	if(!Diversion.GetProvider().IsRepoFound())
+	if(!bInitializedSuccessfuly)
 	{
-		// TODO: Currently error messages are returned as Info as well.
-		// Will be solved upon changing to REST API call
-		auto Msg = InfoMessages.Num() > 0 ? InfoMessages[0] : "Unknown error";
-		const FText NotificationText = FText::Format(LOCTEXT("Initialization_Failure", "Repository initialization failed: {0}"), FText::FromString(Msg));
-		DiversionUtils::ShowErrorNotification(NotificationText);
+		FString DiversionDirectoryPath = RepoPath / TEXT(".diversion");
+		if (FPaths::DirectoryExists(DiversionDirectoryPath))
+		{
+			auto SendFailedInitOperation = ISourceControlOperation::Create<FSendAnalytics>();
+			SendFailedInitOperation->SetEventName(FText::FromString(".diversion folder - UE Plugin Init Failure "));
+			SourceControlProvider->Execute(SendFailedInitOperation, nullptr, TArray<FString>(), EConcurrency::Asynchronous);
+
+
+			FNotificationButtonInfo LearnMoreButton(LOCTEXT("DiversionRepoInitFailed_LearnMore", "Learn More"),
+				LOCTEXT("DiversionRepoInitFailed_LearnMore_Tooltip", "View the documentation to understand and resolve this issue."),
+				FSimpleDelegate::CreateLambda([]()
+					{
+						const FString FailedInitFolderExistLink = "https://docs.diversion.dev/unreal/common-plugin-issues/existing-config-in-path?utm_source=ue-plugin&utm_medium=plugin";
+						if (FPlatformProcess::CanLaunchURL(*FailedInitFolderExistLink))
+						{
+							FPlatformProcess::LaunchURL(*FailedInitFolderExistLink, nullptr, nullptr);
+						}
+					}),
+				SNotificationItem::CS_Fail);
+
+			auto notification = FDiversionNotification(
+				LOCTEXT("DiversionConfigExists", "Plugin initialization failed due to an existing '.diversion' config in this project path"),
+				TArray<FNotificationButtonInfo>({ LearnMoreButton }),
+				SNotificationItem::CS_Fail);
+			SourceControlProvider->ShowNotification(notification);
+
+			return FReply::Handled();
+		}
+
+		FNotificationButtonInfo LearnMoreButton(LOCTEXT("DiversionRepoInitFailed_GetSupport", "Get Help"),
+			LOCTEXT("DiversionRepoInitFailed_GetSupport_Tooltip", "Access support and get assistance for this issue"),
+			FSimpleDelegate::CreateLambda([]()
+				{
+					const FString GetHelpLink = "https://www.diversion.dev/plugin-support";
+					if (FPlatformProcess::CanLaunchURL(*GetHelpLink))
+					{
+						FPlatformProcess::LaunchURL(*GetHelpLink, nullptr, nullptr);
+					}
+				}),
+			SNotificationItem::CS_Fail);
+
+		auto notification = FDiversionNotification(
+			LOCTEXT("Initialization_Failure", "Repository initialization failed"),
+			TArray<FNotificationButtonInfo>({ LearnMoreButton }),
+			SNotificationItem::CS_Fail);
+		SourceControlProvider->ShowNotification(notification);
+		
+		// Add analytics for failed repo initialization
+		auto SendFailedInitOperation = ISourceControlOperation::Create<FSendAnalytics>();
+		SendFailedInitOperation->SetEventName(FText::FromString("UE Plugin Init Failed"));
+		SourceControlProvider->Execute(SendFailedInitOperation, nullptr, TArray<FString>(), EConcurrency::Asynchronous);
+	}
+	else {
+		DisplayInfoNotification("Diversion is now synching your files in the background, this might take a while. Source control operations will be available once initial sync will be finished.");
 	}
 
-	DisplayInfoNotification("Diversion is now synching your files in the background, this might take a while. Source control operations will be available once initial sync will be finished.");
-
 	// Retrive agent status to update sync status as well
-	Diversion.GetProvider().IsAgentAlive(EConcurrency::Synchronous, true);
-
-	//if (Diversion.GetProvider().IsAvailable())
-	//{
-	//	if (bInitialCommit)
-	//	{
-	//		LaunchCommitOperation();
-	//	}
-	//}
+	SourceControlProvider->IsAgentAlive(EConcurrency::Synchronous, true);
 
 	// Update the provider
 	return FReply::Handled();
 }
 
-// Launch an asynchronous "Check-In(Commit)" operation and start an ongoing notification
-void SDiversionSettings::LaunchCommitOperation()
-{
-	const auto CheckInOperation = ISourceControlOperation::Create<FCheckIn>();
-	CheckInOperation->SetDescription(InitialCommitMessage);
-	FDiversionModule& DiversionModule = FModuleManager::LoadModuleChecked<FDiversionModule>("Diversion");
-
-	const ECommandResult::Type Result = DiversionModule.GetProvider().
-		Execute(CheckInOperation, nullptr, TArray<FString>(), EConcurrency::Synchronous,
-			FSourceControlOperationComplete::CreateSP(this, &SDiversionSettings::OnSourceControlOperationComplete));
-	if (Result == ECommandResult::Succeeded)
+FString SDiversionSettings::NormalizeRepoPath() const {
+#if PLATFORM_WINDOWS
+	FString FullRepoPath = FPaths::ConvertRelativePathToFull(RepoPath).Replace(TEXT("/"), TEXT("\\"));
+#elif PLATFORM_LINUX || PLATFORM_MAC
+	FString FullRepoPath = FPaths::ConvertRelativePathToFull(RepoPath);
+#endif
+	if (FullRepoPath.EndsWith(TEXT("\\")) || FullRepoPath.EndsWith(TEXT("/")))
 	{
-		DisplayInProgressNotification(CheckInOperation);
+		FullRepoPath = FullRepoPath.LeftChop(1);
 	}
-	else
-	{
-		DisplayFailureNotification(CheckInOperation);
-	}
+	return FullRepoPath;
 }
 
 FReply SDiversionSettings::OnClickedOpenDiversionQuickstart() const
@@ -408,16 +456,23 @@ FReply SDiversionSettings::OnClickedOpenDiversionQuickstart() const
 	return FReply::Handled();
 }
 
+FReply SDiversionSettings::OnClickedOpenDiversionRepoWithSameNameExists() const
+{
+	FPlatformProcess::LaunchURL(TEXT("https://docs.diversion.dev/unreal/common-plugin-issues/repo-already-exists?utm_source=ue-plugin&utm_medium=plugin"), nullptr, nullptr);
+	return FReply::Handled();
+}
+
 FReply SDiversionSettings::OnClickedStartDiversionAgent() const
 {
-	auto& Provider = FDiversionModule::Get().GetProvider();
 	DiversionUtils::StartDiversionAgent(FDiversionModule::Get().AccessSettings().GetBinaryPath());
 	// Update the provider
-	if (!Provider.IsAgentAlive(EConcurrency::Synchronous, true)) {
+	if (!SourceControlProvider->IsAgentAlive(EConcurrency::Synchronous, true)) {
 		FText Message = FText::FromString("Failed starting Diversion Sync Agent");
-		DisplayFailureNotification(Message);
+		DiversionUtils::ShowErrorNotification(Message);
 	}
-	Provider.GetWsInfo(EConcurrency::Synchronous, true);
+
+	SourceControlProvider->GetWsInfo(EConcurrency::Synchronous, true);
+	SourceControlProvider->IsWorkspaceExistsInPath(RepoName, RepoPath, EConcurrency::Synchronous, true);
 
 	return FReply::Handled();
 }
@@ -431,10 +486,6 @@ void SDiversionSettings::OnSourceControlOperationComplete(const FSourceControlOp
 	if (InResult == ECommandResult::Succeeded)
 	{
 		DisplaySuccessNotification(InOperation);
-	}
-	else
-	{
-		DisplayFailureNotification(InOperation);
 	}
 }
 
@@ -479,23 +530,6 @@ void SDiversionSettings::DisplaySuccessNotification(const FSourceControlOperatio
 	FNotificationInfo Info(NotificationText);
 	Info.bUseSuccessFailIcons = true;
 	Info.Image = FAppStyle::GetBrush(TEXT("NotificationList.SuccessImage"));
-	FSlateNotificationManager::Get().AddNotification(Info);
-}
-
-// Display a temporary failure notification at the end of the operation
-void SDiversionSettings::DisplayFailureNotification(const FSourceControlOperationRef& InOperation)
-{
-	const FText NotificationText = FText::Format(LOCTEXT("InitialCommit_Failure", "Error: {0} operation failed!"), FText::FromName(InOperation->GetName()));
-	FNotificationInfo Info(NotificationText);
-	Info.ExpireDuration = 8.0f;
-	FSlateNotificationManager::Get().AddNotification(Info);
-}
-
-
-void SDiversionSettings::DisplayFailureNotification(const FText& Message) const
-{
-	FNotificationInfo Info(Message);
-	Info.ExpireDuration = 8.0f;
 	FSlateNotificationManager::Get().AddNotification(Info);
 }
 

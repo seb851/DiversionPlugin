@@ -9,12 +9,27 @@
 #include "DiversionUtils.h"
 
 #include "SourceControlOperationBase.h"
-#include "OpenAPIFileEntry.h"
+#include "FileEntry.h"
 
 #define LOCTEXT_NAMESPACE "SourceControl"
 
 
 #pragma region Diversion Source Control Operations
+
+class FUpdateWorkspaceOperation : public FSourceControlOperationBase
+{
+public:
+	// ISourceControlOperation interface
+	virtual FName GetName() const override
+	{
+		return "UpdateWorkspace";
+	}
+
+	virtual FText GetInProgressString() const override
+	{
+		return FText();
+	}
+};
 
 class FGetWsInfo : public FSourceControlOperationBase
 {
@@ -204,18 +219,98 @@ private:
 };
 
 
-class FGetPotentialConflicts : public FSourceControlOperationBase
+class FGetPotentialClashes : public FSourceControlOperationBase
 {
 public:
 	virtual FName GetName() const override
 	{
-		return "GetPotentialConflicts";
+		return "GetPotentialClashes";
 	}
 	
 	virtual FText GetInProgressString() const override
 	{
-		return LOCTEXT("SourceControl_GetPotentialConflicts", "Updating file Revision Control status...");
+		return LOCTEXT("SourceControl_GetPotentialClashes", "Updating file Revision Control status...");
 	}
+};
+
+class FGetConflictedFiles : public FSourceControlOperationBase
+{
+public:
+	virtual FName GetName() const override
+	{
+		return "GetConflictedFiles";
+	}
+	
+	virtual FText GetInProgressString() const override
+	{
+		return LOCTEXT("SourceControl_GetPotentialClashes", "Checking for conflicts in your workspace...");
+	}
+};
+
+class FCheckForRepoWithSameName : public FSourceControlOperationBase
+{
+public:
+	virtual FName GetName() const override
+	{
+		return "CheckForRepoWithSameName";
+	}
+
+	virtual FText GetInProgressString() const override
+	{
+		return LOCTEXT("SourceControl_CheckForRepoWithSameName", "Making sure a repo with the same name doesn't already exist");
+	}
+
+	void SetRepoName(const FString& InRepoName)
+	{
+		RepoName = InRepoName;
+	}
+
+	const FString& GetRepoName() const
+	{
+		return RepoName;
+	}
+
+private:
+	FString RepoName;
+};
+
+class FCheckIfWorkspaceExistsInPath : public FSourceControlOperationBase
+{
+public:
+	virtual FName GetName() const override
+	{
+		return "CheckIfWorkspaceExistsInPath";
+	}
+
+	virtual FText GetInProgressString() const override
+	{
+		return LOCTEXT("SourceControl_CheckIfWorkspaceExistsInPath", "Checking if a workspace already exists in the path");
+	}
+
+	void SetPath(const FString& InRepoPath)
+	{
+		Path = InRepoPath;
+	}
+
+	const FString& GetPath() const
+	{
+		return Path;
+	}
+
+	void SetRepoName(const FString& InRepoName)
+	{
+		RepoName = InRepoName;
+	}
+
+	const FString& GetRepoName() const
+	{
+		return RepoName;
+	}
+
+private:
+	FString Path;
+	FString RepoName;
+
 };
 
 #pragma endregion
@@ -223,6 +318,44 @@ public:
 #undef LOCTEXT_NAMESPACE
 
 #pragma region Diversion Workers
+
+
+class FDiversionCheckForRepoWithSameNameWorker final : public IDiversionWorker
+{
+public:
+	// IDiversionWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(class FDiversionCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+
+public:
+	bool bRepoWithSameNameExists = false;
+};
+
+
+class FDiversionCheckIfWorkspaceExistsInPathWorker final : public IDiversionWorker
+{
+public:
+	// IDiversionWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(class FDiversionCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+
+public:
+	bool bWorkspaceExistsInPath = false;
+	bool bRepoWithSameNameExists = false;
+};
+
+
+class FDiversionUpdateWorkspaceWorker final : public IDiversionWorker
+{
+public:
+	// IDiversionWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(class FDiversionCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+};
+
 
 class FDiversionInitRepoWorker final : public IDiversionWorker, public TSharedFromThis<FDiversionInitRepoWorker>
 {
@@ -249,7 +382,7 @@ public:
 	virtual bool UpdateStates() const override;
 
 public:
-	CoreAPI::OpenAPIFileEntry FileEntry;
+	Diversion::CoreAPI::Model::FileEntry FileEntry;
 	DiversionUtils::EDiversionWsSyncStatus SyncStatus;
 };
 
@@ -294,10 +427,10 @@ public:
 	virtual bool Execute(class FDiversionCommand& InCommand) override;
 };
 
-class FDiversionGetPotentialConflicts final : public IDiversionWorker
+class FDiversionGetPotentialClashes final : public IDiversionWorker
 {
 public:
-	virtual ~FDiversionGetPotentialConflicts() override {}
+	virtual ~FDiversionGetPotentialClashes() override {}
 	// IDiversionWorker interface
 	virtual FName GetName() const override;
 	virtual bool Execute(class FDiversionCommand& InCommand) override;
@@ -310,6 +443,23 @@ private:
 	TMap<FString, TArray<EDiversionPotentialClashInfo>> PotentialClashes;
 	TArray<FString> QueriedPaths;
 	bool bRecursiveRequest = false;
+};
+
+class FDiversionGetConflictedFiles final : public IDiversionWorker
+{
+public:
+	virtual ~FDiversionGetConflictedFiles() override {}
+	// IDiversionWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(class FDiversionCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+
+private:
+	bool bRequireUpdate = false;
+	TMap<FString, FDiversionResolveInfo> ConflictedFilesData;
+
+	TArray<Diversion::CoreAPI::Model::Merge> WorkspaceMergesList;
+	TArray<Diversion::CoreAPI::Model::Merge> BranchMergesList;
 };
 
 #pragma endregion
@@ -412,8 +562,9 @@ public:
 	virtual bool UpdateStates() const override;
 private:
 	bool UpdateHistory(FDiversionCommand& InCommand);
+	bool UpdateConflicts() const;
 	bool IsFullRepoStatusQuery(const FString& RepoPath) const;
-	void MarkSynchingFiles() const;
+	void MarkSyncingFiles() const;
 	
 private:
 	/** The paths passed in the command we want the status of */
@@ -422,6 +573,14 @@ private:
 	bool bShouldUpdateStates = false;
 	/** Indicates if we want to trigger an async status update call */
 	bool bTriggerStatusReload = false;
+
+	/** Storing Conflicts states output information from API calls*/
+	bool bShouldUpdateConflicts = false;
+	TMap<FString, FDiversionResolveInfo> ConflictedFilesData;
+
+	TArray<Diversion::CoreAPI::Model::Merge> WorkspaceMergesList;
+	TArray<Diversion::CoreAPI::Model::Merge> BranchMergesList;
+	/***/
 };
 
 /** Copy or Move operation on a single file */
@@ -445,12 +604,43 @@ class FDiversionResolveWorker final : public IDiversionWorker
 public:
 	virtual ~FDiversionResolveWorker() override {}
 	virtual FName GetName() const override;
-	virtual bool Execute(class FDiversionCommand& InCommand) override;
+	virtual bool Execute(FDiversionCommand& InCommand) override;
 	virtual bool UpdateStates() const override;
 	
 private:
 	/** Temporary FilesToResolve list to update the Provider */
-	TMap<FString, FDiversionResolveInfo> FilesToResolve;
+	TArray<FString> FilesToResolve;
 };
+
+class FDiversionSyncWorker final : public IDiversionWorker
+{
+public:
+	virtual ~FDiversionSyncWorker() override {}
+	// IDiversionWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(FDiversionCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+};
+
+class FDiversionGetPendingChangelistsWorker final : public IDiversionWorker
+{
+public:
+	virtual ~FDiversionGetPendingChangelistsWorker() override {}
+	// IDiversionWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(FDiversionCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+};
+
+
+class FDiversionOperationNotSupportedWorker final : public IDiversionWorker
+{
+public:
+	// IDiversionWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(FDiversionCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+};
+
 
 #pragma endregion

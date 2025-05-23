@@ -31,11 +31,7 @@ public:
 	*/
 	TOptional<DiversionUtils::EDiversionWsSyncStatus> SyncStatus;
 
-	struct FLockedPackage {
-		UPackage* Package;
-		FString Path;
-	};
-	TArray<FLockedPackage> LockedPackages = TArray<FLockedPackage>();
+	TArray<FString> OpenedPackagePaths = TArray<FString>();
 	bool ReloadStatusReuired = false;
 
 private:

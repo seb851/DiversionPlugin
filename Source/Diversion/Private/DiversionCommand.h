@@ -7,6 +7,7 @@
 #include "DiversionWorkspaceInfo.h"
 #include "DiversionState.h"
 #include "DiversionUtils.h"
+#include "CustomWidgets/NotificationManager.h"
 
 /**
  * Used to execute Diversion commands multi-threaded.
@@ -55,7 +56,7 @@ public:
 	 */
 	DiversionUtils::EDiversionWsSyncStatus SyncStatus;
 
-	TMap<FString, FDiversionResolveInfo> ConflictedFiles;
+	TArray<FString> ConflictedFiles;
 
 	/** Operation we want to perform - contains outward-facing parameters & results */
 	TSharedRef<class ISourceControlOperation, ESPMode::ThreadSafe> Operation;
@@ -86,6 +87,9 @@ public:
 
 	/** Potential conflicted file paths to query again - used to know promptly if their state was resolved */
 	TArray<FString> ExistingPotentialConflicts;
+
+	/** Notification to show to the user as an Editor popup */
+	TUniquePtr<FDiversionNotification> PopupNotification;
 
 private:
 	/** Perform the actual work of the command */

@@ -1,76 +1,47 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "SyncApiCall.h"
 #include "DiversionUtils.h"
 #include "DiversionCommand.h"
+#include "DiversionModule.h"
 
-#include "OpenAPIDefaultApi.h"
-#include "OpenAPIDefaultApiOperations.h"
-
-using namespace AgentAPI;
-
-using FWsSync = OpenAPIDefaultApi;
-
-class FSyncGetWorkspaceSyncStatus;
-using FGetWorkspaceSyncStatusAPI = TSyncApiCall<
-	FSyncGetWorkspaceSyncStatus,
-	FWsSync::GetWorkspaceSyncStatusRequest,
-	FWsSync::GetWorkspaceSyncStatusResponse,
-	FWsSync::FGetWorkspaceSyncStatusDelegate,
-	FWsSync,
-	&FWsSync::GetWorkspaceSyncStatus,
-	UnauthorizedCall,
-	// Output parameters
-	const FDiversionCommand&, /*InCommand*/
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>& /*InfoMessages*/
-	>;
-
-
-class FSyncGetWorkspaceSyncStatus final : public FGetWorkspaceSyncStatusAPI {
-	friend FGetWorkspaceSyncStatusAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(const FDiversionCommand& InCommand,
-		TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FWsSync::GetWorkspaceSyncStatusResponse& Response);
-};
-REGISTER_PARSE_TYPE(FSyncGetWorkspaceSyncStatus);
-
-
-bool FSyncGetWorkspaceSyncStatus::ResponseImplementation(const FDiversionCommand& InCommand,
-	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FWsSync::GetWorkspaceSyncStatusResponse& Response) {
-	IDiversionWorker& Worker = static_cast<IDiversionWorker&>(InCommand.Worker.Get());
-
-	if (!Response.IsSuccessful()) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
-		Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::Unknown;
-		return false;
-	}
-
-	// Waiting for implementation
-	if (Response.Content.IsPaused) {
-		Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::Paused;
-	}
-	else if (Response.Content.IsSyncComplete) {
-		Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::Completed;
-	} else{
-		Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::InProgress;
-	}
-
-	return true;
-}
-
+using namespace Diversion::AgentAPI;
 
 bool DiversionUtils::AgentInSync(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages)
 {
-	auto Request = FWsSync::GetWorkspaceSyncStatusRequest();
-	Request.RepoID = InCommand.WsInfo.RepoID;
-	Request.WorkspaceID = InCommand.WsInfo.WorkspaceID;
+	IDiversionWorker& Worker = static_cast<IDiversionWorker&>(InCommand.Worker.Get());
 
-	auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncGetWorkspaceSyncStatus>();
-	bool Success = ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand, OutInfoMessages, OutErrorMessages);
+	auto ErrorResponse = DefaultApi::FgetWorkspaceSyncStatusDelegate::Bind([&]() {
+		Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::Unknown;
+		return false;
+	});
+
+	auto VariantResponse = DefaultApi::FgetWorkspaceSyncStatusDelegate::Bind([&](const TVariant<TSharedPtr<WorkspaceSyncStatus>>& Variant) {
+		if (!Variant.IsType<TSharedPtr<WorkspaceSyncStatus>>()) {
+			Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::Unknown;
+			// Unexpected response type
+			OutErrorMessages.Add("Unexpected response type");
+			return false;
+		}
+		auto Value = Variant.Get<TSharedPtr<WorkspaceSyncStatus>>();
+
+		if (Value->mIsPaused) {
+			Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::Paused;
+		}
+		else if (Value->mIsSyncComplete) {
+			Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::Completed;
+		}
+		else {
+			Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::InProgress;
+		}
+
+		return true;
+	});
+
+	bool Success = FDiversionModule::Get().AgentAPIRequestManager->GetWorkspaceSyncStatus(InCommand.WsInfo.RepoID, InCommand.WsInfo.WorkspaceID, FString(), {}, 5, 5).
+		HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
 	if (Success) {
-		Success &= WorkspaceSyncProgress(InCommand, OutInfoMessages, OutErrorMessages);
+		Success &= GetWorkspaceSyncProgress(InCommand, OutInfoMessages, OutErrorMessages);
 	}
+
 	return Success;
 }

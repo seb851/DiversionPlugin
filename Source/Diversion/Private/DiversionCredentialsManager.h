@@ -10,6 +10,7 @@ public:
 	FString GetUserAccessToken(FString& InUserId);
 
 private:
+
 	TMap<FString, TSharedPtr<FJsonObject>> UserCredsMap;
 
 	FString RefreshAndCacheAccessToken(TSharedPtr<FJsonObject> ExistingCredFile);

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "DiversionRevision.h"
+#include "Conflict.h"
 
 namespace EWorkingCopyState
 {
@@ -16,7 +17,6 @@ namespace EWorkingCopyState
 		Renamed,
 		Copied,
 		Missing,
-		Conflicted,
 		NotControlled,
 		Ignored,
 	};
@@ -26,6 +26,7 @@ struct FDiversionResolveInfo : public ISourceControlState::FResolveInfo
 {
 	FString MergeId;
 	FString ConflictId;
+	TOptional<Diversion::CoreAPI::Model::Conflict::Resolved_sideEnum> ResolutionSide;
 };
 
 struct EDiversionPotentialClashInfo {
@@ -140,6 +141,12 @@ public:
 	
 	/** Get the list of other users currently editing this file (Potential clash)*/
 	FString GetOtherEditorsList() const;
+	
+	void ClearResolveInfo();
+
+	const FDiversionResolveInfo& GetPendingResolveInfo() const;
+
+	void AddPendingResolveInfo(const FDiversionResolveInfo& InResolveInfo);
 
 public:
 	/** History of the item, if any */
@@ -150,9 +157,6 @@ public:
 
 	/** Latest rev number at which a file was synced to before being edited */
 	int LocalRevNumber;
-
-	/** Pending rev info with which a file must be resolved, invalid if no resolve pending */
-	FDiversionResolveInfo PendingResolveInfo;
 
 	UE_DEPRECATED(5.3, "Use PendingResolveInfo.BaseRevision instead")
 	FString PendingMergeBaseFileHash;
@@ -171,4 +175,8 @@ public:
 
 	/** Flag to indicate if the file is currently being synced or is it's working state valid */
 	bool IsSyncing = false;
+
+private:
+	/** Pending rev info with which a file must be resolved, invalid if no resolve pending */
+	FDiversionResolveInfo PendingResolveInfo;
 };

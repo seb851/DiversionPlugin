@@ -9,12 +9,8 @@
 #include "Misc/Paths.h"
 #include "TimerManager.h"
 
-#include "HttpModule.h"
-#include "HttpManager.h"
-#include "Interfaces/IHttpRequest.h"
-#include "Interfaces/IHttpResponse.h"
+#include "DiversionHttpManager.h"
 
-//#include "Windows/AllowWindowsPlatformTypes.h"
 #if PLATFORM_WINDOWS
 #include <shlobj.h>
 #endif
@@ -164,48 +160,41 @@ FString FCredentialsManager::RefreshAndCacheAccessToken(TSharedPtr<FJsonObject> 
 	if (TokenObject->HasField(TEXT("refresh_token"))) {
 		TokenObject->TryGetStringField(TEXT("refresh_token"), RefreshToken);
 
-		TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
-		Request->SetURL(OauthURL);
-		Request->SetVerb("POST");
-		Request->SetHeader("Content-Type", "application/x-www-form-urlencoded");
+		TMap<FString, FString> Headers;
+		FString ContentType = TEXT("application/x-www-form-urlencoded");
+		//Headers.Add("Content-Type", ContentType);
 		FString Body = FString::Printf(TEXT("grant_type=refresh_token&refresh_token=%s&client_id=%s"),
 			*FString(RefreshToken), *FString(ClientId));
-		Request->SetContentAsString(Body);
+		DiversionHttp::FHttpRequestManager CredentialsRequestManager(OauthURL);
+		FString RequestPath = DiversionHttp::GetPathFromUrl(OauthURL);
 
-		Request->OnProcessRequestComplete().BindLambda([&AccessToken = AccessToken, &DelegateDone = DelegateDone, TokenObject, ExistingCredFile](FHttpRequestPtr Request, FHttpResponsePtr Response, bool bWasSuccessful)
-			{
-				if (bWasSuccessful && Response.IsValid())
-				{
-					FString ResponseStr = Response->GetContentAsString();
-					TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
-					TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ResponseStr);
+		auto Response = CredentialsRequestManager.SendRequest(RequestPath, DiversionHttp::HttpMethod::POST, FString(), ContentType, Body, Headers, 5, 120);
+		if(Response.Error.IsSet()) {
+			UE_LOG(LogTemp, Error, TEXT("Failed using the refresh token auth flow: %s"), *Response.Error.GetValue());
+			return "";
+		}
 
-					if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
-					{
-						AccessToken = JsonObject->GetStringField(TEXT("access_token"));
-						FString TokenType = JsonObject->GetStringField(TEXT("token_type"));
-						int32 ExpiresIn = JsonObject->GetIntegerField(TEXT("expires_in"));
-						FString IdToken = JsonObject->GetStringField(TEXT("id_token"));
-						if (TokenType != "Bearer") {
-							UE_LOG(LogTemp, Warning, TEXT("Got a token of type != Bearer"));
-						}
-						TokenObject->SetStringField(TEXT("access_token"), AccessToken);
-						ExistingCredFile->SetObjectField(TEXT("token"), TokenObject);
-					}
-				}
-				else
-				{
-					UE_LOG(LogTemp, Error, TEXT("Failed using the refresh token auth flow"));
-				}
-				DelegateDone = true;
-			});
+		if(Response.ResponseCode >= 400) {
+			UE_LOG(LogTemp, Error, TEXT("Failed using the refresh token auth flow: %s"), *Response.Error.GetValue());
+			return "";
+		}
 
-		auto resp = Request->ProcessRequest();
-		double AvoidLogSynchronizationSpammig = 3.0;
-		double Timeout = 5.0;
-		DiversionUtils::WaitForHttpRequest(Timeout, Request, "RefreshCredentials", AvoidLogSynchronizationSpammig);
-		while (!DelegateDone) {
-			FPlatformProcess::Sleep(0.01f);
+		FString ResponseStr = Response.Contents;
+
+		TSharedPtr<FJsonObject> JsonObject = MakeShareable(new FJsonObject());
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ResponseStr);
+
+		if (FJsonSerializer::Deserialize(Reader, JsonObject) && JsonObject.IsValid())
+		{
+			AccessToken = JsonObject->GetStringField(TEXT("access_token"));
+			FString TokenType = JsonObject->GetStringField(TEXT("token_type"));
+			int32 ExpiresIn = JsonObject->GetIntegerField(TEXT("expires_in"));
+			FString IdToken = JsonObject->GetStringField(TEXT("id_token"));
+			if (TokenType != "Bearer") {
+				UE_LOG(LogTemp, Warning, TEXT("Got a token of type != Bearer"));
+			}
+			TokenObject->SetStringField(TEXT("access_token"), AccessToken);
+			ExistingCredFile->SetObjectField(TEXT("token"), TokenObject);
 		}
 	}
 	else {

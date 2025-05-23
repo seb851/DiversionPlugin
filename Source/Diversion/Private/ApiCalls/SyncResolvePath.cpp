@@ -1,54 +1,12 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "SyncApiCall.h"
 #include "DiversionUtils.h"
 #include "DiversionCommand.h"
-#include "ISourceControlModule.h"
+#include "DiversionModule.h"
 #include "DiversionOperations.h"
 
-#include "OpenAPIRepositoryMergeManipulationApi.h"
-#include "OpenAPIRepositoryMergeManipulationApiOperations.h"
 
-
-using namespace CoreAPI;
-
-using Resolve = OpenAPIRepositoryMergeManipulationApi;
-
-class FSyncResolve;
-using FResolveAPI = TSyncApiCall<
-	FSyncResolve,
-	Resolve::SrcHandlersv2MergeSetResultRequest,
-	Resolve::SrcHandlersv2MergeSetResultResponse,
-	Resolve::FSrcHandlersv2MergeSetResultDelegate,
-	Resolve,
-	&Resolve::SrcHandlersv2MergeSetResult,
-	AuthorizedCall,
-	// Output parameters
-	const FDiversionCommand&, /*InCommand*/
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>& /*InfoMessages*/>;
-
-
-class FSyncResolve final : public FResolveAPI {
-	friend FResolveAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(const FDiversionCommand& InCommand,
-		TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const Resolve::SrcHandlersv2MergeSetResultResponse& Response);
-};
-REGISTER_PARSE_TYPE(FSyncResolve);
-
-
-bool FSyncResolve::ResponseImplementation(const FDiversionCommand& InCommand,
-	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const Resolve::SrcHandlersv2MergeSetResultResponse& Response) {
-	if (!Response.IsSuccessful()) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
-		return false;
-	}
-
-	OutInfoMessages.Add("File resolved");
-	return true;
-}
+using namespace Diversion::CoreAPI;
 
 
 bool DiversionUtils::RunResolvePath(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, 
@@ -77,18 +35,20 @@ bool DiversionUtils::RunResolvePath(const FDiversionCommand& InCommand, TArray<F
 
 	FDiversionResolveFileWorker& Worker = static_cast<FDiversionResolveFileWorker&>(InCommand.Worker.Get());
 
-	auto Request = Resolve::SrcHandlersv2MergeSetResultRequest();
-	Request.RepoId = InCommand.WsInfo.RepoID;
-	Request.MergeId = InMergeId;
-	Request.ConflictId = InConflictId;
-	Request.Path = DiversionUtils::ConvertFullPathToRelative(FilePath, InCommand.WsInfo.GetPath());
-	Request.Mode = Worker.FileEntry.Mode;
-	Request.Body = "";
-	Request.Size = Worker.FileEntry.Blob->Size;
-	Request.Sha1 = Worker.FileEntry.Blob->Sha;
-	Request.StorageBackend = Worker.FileEntry.Blob->StorageBackend;
-	Request.StorageUri = Worker.FileEntry.Blob->StorageUri;
-
-	auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncResolve>();
-	return ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand, OutInfoMessages, OutInfoMessages);
+	auto ErrorResponse = RepositoryMergeManipulationApi::Fsrc_handlersv2_merge_setResultDelegate::Bind(
+		[&]() {
+			return false;
+		}
+	);
+	auto VariantResponse = RepositoryMergeManipulationApi::Fsrc_handlersv2_merge_setResultDelegate::Bind(
+		[&]() {
+			OutInfoMessages.Add("File resolved");
+			return true;
+		}
+	);
+	
+	return FDiversionModule::Get().RepositoryMergeManipulationAPIRequestManager->SrcHandlersv2MergeSetResult(
+		InCommand.WsInfo.RepoID, InMergeId, InConflictId, Worker.FileEntry.mMode, MakeShared<HttpContent>(), Worker.FileEntry.mBlob->mSize,
+		Worker.FileEntry.mBlob->mSha, Worker.FileEntry.mBlob->mStorage_backend, Worker.FileEntry.mBlob->mStorage_uri, DiversionUtils::ConvertFullPathToRelative(FilePath, InCommand.WsInfo.GetPath()),
+		FDiversionModule::Get().GetAccessToken(InCommand.WsInfo.AccountID), {}, 5, 120).HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
 }

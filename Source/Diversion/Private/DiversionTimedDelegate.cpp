@@ -4,6 +4,22 @@
 
 void FTimedDelegateWrapper::TriggerInstantCallAndReset()
 {
+	if (FApp::IsUnattended())
+	{
+		// In unattended mode(MRQ, cmdlet runs etc. ), we can't detect the game thread 
+		// and trigger an async task.
+		// So we just call the delegate directly only if we are in the main thread (the usual "correct" scenario)
+		// and ignore it otherwise.
+		// Non-game thread calls normally shouldn't happen.
+		// In case they do it will just impose a minimal UI update delay.
+		if(IsInGameThread())
+		{
+			Delegate.ExecuteIfBound();
+			ResetInterval();
+		}
+		return;
+	}
+	
 	// Ensure the function is called on the game thread
 	AsyncTask(ENamedThreads::GameThread, [this]() {
 		// Trigger the function instantly

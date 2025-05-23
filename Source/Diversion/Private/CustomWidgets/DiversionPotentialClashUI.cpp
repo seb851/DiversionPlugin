@@ -8,6 +8,29 @@
 #include "RevisionControlStyle/RevisionControlStyle.h"
 
 
+TSharedPtr<FDiversionState, ESPMode::ThreadSafe> GetDiversionStateForAsset(FString AssetPath)
+{
+	try {
+		auto& Provider = ISourceControlModule::Get().GetProvider();
+		if (!Provider.GetName().ToString().Equals("Diversion"))
+		{
+			return nullptr;
+		}
+
+		FSourceControlStatePtr SourceControlState = Provider.GetState(AssetPath, EStateCacheUsage::Use);
+		if(!SourceControlState.IsValid())
+		{
+			return nullptr;
+		}
+		return StaticCastSharedPtr<FDiversionState>(SourceControlState);
+	}
+	catch (...)
+	{
+		return nullptr;
+	}
+}
+
+
 const FSlateBrush* SPotentialClashIndicator::PotentialClashIcon = nullptr;
 
 /**
@@ -25,11 +48,19 @@ void SPotentialClashIndicator::Construct(const FArguments& InArgs)
 			SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION <= 4
 				.Padding(2.0f, 3.0f)
 				[
 					SNew(SBox)
 						.WidthOverride(16.0f)
 						.HeightOverride(16.0f)
+#else
+				.Padding(0.0f, 0.0f, 16.0f, 0.f)
+				[
+					SNew(SBox)
+						.WidthOverride(16.0f)
+						.HeightOverride(32.0f)
+#endif
 						[
 							SNew(SImage).Image(this, &SPotentialClashIndicator::GetImageBrush)
 						]
@@ -43,15 +74,23 @@ void SPotentialClashIndicator::CacheIndicatorBrush()
 {
 	if (PotentialClashIcon == nullptr)
 	{
-		PotentialClashIcon = FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl.NotAtHeadRevision").GetIcon();
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION <= 4
+		const FString RevisionControlClashIcon = FString(TEXT("RevisionControl.NotAtHeadRevision"));
+#else
+		const FString RevisionControlClashIcon = FString(TEXT("RevisionControl.ModifiedBadge"));
+#endif
+		PotentialClashIcon = FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), *RevisionControlClashIcon).GetIcon();
 	}
 }
 
 bool SPotentialClashIndicator::IsAssetHasPotentialClashes(FString Path)
 {
-	FSourceControlStatePtr SourceControlState = ISourceControlModule::Get().GetProvider().GetState(Path, EStateCacheUsage::Use);
-	TSharedPtr<FDiversionState, ESPMode::ThreadSafe> DiversionState = StaticCastSharedPtr<FDiversionState>(SourceControlState);
-	return DiversionState && DiversionState->PotentialClashes.GetPotentialClashesCount() > 0;
+	TSharedPtr<FDiversionState, ESPMode::ThreadSafe> DiversionState = GetDiversionStateForAsset(Path);
+	if (!DiversionState)
+	{
+		return false;
+	}
+	return DiversionState->PotentialClashes.GetPotentialClashesCount() > 0;
 }
 
 /**
@@ -73,14 +112,20 @@ void SPotentialClashTooltip::Construct(const FArguments& InArgs)
 
 bool SPotentialClashTooltip::IsAssetHasPotentialClashes(FString Path)
 {
-	FSourceControlStatePtr SourceControlState = ISourceControlModule::Get().GetProvider().GetState(Path, EStateCacheUsage::Use);
-	TSharedPtr<FDiversionState, ESPMode::ThreadSafe> DiversionState = StaticCastSharedPtr<FDiversionState>(SourceControlState);
-	return DiversionState && DiversionState->PotentialClashes.GetPotentialClashesCount() > 0;
+	TSharedPtr<FDiversionState, ESPMode::ThreadSafe> DiversionState = GetDiversionStateForAsset(Path);
+	if (!DiversionState)
+	{
+		return false;
+	}
+	return DiversionState->PotentialClashes.GetPotentialClashesCount() > 0;
 }
 
 FText SPotentialClashTooltip::GetTooltip() const
 {
-	FSourceControlStatePtr SourceControlState = ISourceControlModule::Get().GetProvider().GetState(AssetPath, EStateCacheUsage::Use);
-	TSharedPtr<FDiversionState, ESPMode::ThreadSafe> DiversionState = StaticCastSharedPtr<FDiversionState>(SourceControlState);
-	return DiversionState ? FText::FromString(DiversionState->GetOtherEditorsList()) : FText();
+	TSharedPtr<FDiversionState, ESPMode::ThreadSafe> DiversionState = GetDiversionStateForAsset(AssetPath);
+	if (!DiversionState)
+	{
+		return FText();
+	}
+	return FText::FromString(DiversionState->GetOtherEditorsList());
 }

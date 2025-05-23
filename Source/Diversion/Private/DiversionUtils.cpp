@@ -14,17 +14,15 @@
 #include "DiversionModule.h"
 #include "TimerManager.h"
 #include "PackageTools.h"
+#include "FileHelpers.h"
 
 #include "HttpModule.h"
 #include "HttpManager.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
-
-#pragma region Generated REST API headers
-#include "OpenAPIDefaultApi.h"
-#include "OpenAPIDefaultApiOperations.h"
-
-#pragma endregion
+#include "AssetToolsModule.h"
+#include "Misc/PackageName.h"
+#include "UObject/SavePackage.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -70,6 +68,168 @@ namespace DiversionUtils
 			return false;
 		}
 
+		bool SavePackage(UPackage* Package)
+		{
+
+			if (!Package)
+			{
+				return false;
+			}
+
+			FString PackageFileName = FPackageName::LongPackageNameToFilename(Package->GetName(),
+				FPackageName::GetAssetPackageExtension());
+
+			// Save the package with optional flags, using `SavePackage` from `UPackageTools`
+			bool bSuccess = UPackage::SavePackage(
+				Package, 
+				nullptr, 
+				RF_Standalone | RF_Public, 
+				*PackageFileName, 
+				GError, 
+				nullptr, 
+				false, 
+				true, 
+				SAVE_NoError
+			);
+
+			if (bSuccess)
+			{
+				UE_LOG(LogSourceControl, Log, TEXT("Package saved successfully: %s"), *PackageFileName);
+			}
+			else
+			{
+				UE_LOG(LogSourceControl, Error, TEXT("Failed to save package: %s"), *PackageFileName);
+			}
+
+			return bSuccess;
+		}
+
+		void ClosePackageEditor(UPackage* Package)
+		{
+			if (!Package)
+			{
+				UE_LOG(LogSourceControl, Warning, TEXT("Invalid package provided to ClosePackageEditor."));
+				return;
+			}
+
+			// Get the asset associated with the package
+			UObject* Asset = Package->FindAssetInPackage();
+			if (!Asset)
+			{
+				UE_LOG(LogSourceControl, Warning, TEXT("No asset found in package."));
+				return;
+			}
+
+			// Get the Asset Editor Subsystem to close the editor
+			UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+			if (AssetEditorSubsystem->CloseAllEditorsForAsset(Asset))
+			{
+				UE_LOG(LogSourceControl, Display, TEXT("Closed editor tabs for asset: %s"), *Asset->GetName());
+			}
+			else
+			{
+				UE_LOG(LogSourceControl, Warning, TEXT("No open editor tabs found for asset: %s"), *Asset->GetName());
+			}
+		}
+
+		void DiscardUnsavedChanges(UPackage* Package)
+		{
+			if(Package != nullptr)
+			{
+				if(!UPackageTools::ReloadPackages({Package}))
+				{
+					UE_LOG(LogSourceControl, Warning, TEXT("Failed to reload package: %s"), *Package->GetName());
+				}
+			}
+			else
+			{
+				UE_LOG(LogSourceControl, Warning, TEXT("Invalid package provided to DiscardUnsavedChanges."));
+			}
+		}
+
+		bool BackupUnsavedChanges(UPackage* Package)
+		{
+			if (!Package)
+			{
+				UE_LOG(LogSourceControl, Error, TEXT("Package is null, cannot backup unsaved changes"));
+				return false;
+			}
+
+			// Find the primary asset. We assume that its name is the same as the package's short name.
+			const FString PrimaryAssetName = FPackageName::GetShortName(Package->GetName());
+			UObject* PrimaryAsset = FindObject<UObject>(Package, *PrimaryAssetName);
+			if (!PrimaryAsset)
+			{
+				UE_LOG(LogSourceControl, Error, TEXT("Cannot find the primary asset in package %s"), *Package->GetName());
+				// Better to copy the actual data aside and let the user deal with it manually
+				return false;
+			}
+
+			// Determine the backup file name
+			const FString Folder = FPackageName::GetLongPackagePath(Package->GetName());
+			const FString BaseNewName = PrimaryAsset->GetName() + TEXT("_recovered");
+
+			// Ensure the new asset name is unique.
+			IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+			FString NewLongName;
+			FString NewAssetName;
+			AssetTools.CreateUniqueAssetName(Folder / BaseNewName, TEXT(""), NewLongName, NewAssetName);
+
+			// Duplicate the primary asset into the new package.
+			UObject* NewAsset = AssetTools.DuplicateAsset(NewAssetName, Folder, PrimaryAsset);
+			if (!NewAsset)
+			{
+				UE_LOG(LogSourceControl, Error, TEXT("Asset duplication failed for %s"), *PrimaryAsset->GetName());
+				return false;
+			}
+
+			// Notify the Asset Registry so the new asset appears in the Content Browser.
+			FAssetRegistryModule::AssetCreated(NewAsset);
+
+			// Retrieve the new asset's package
+			UPackage* NewPkg = NewAsset->GetPackage();
+
+			// Convert the package name to the expected on disk file path.
+			const FString AbsFilename = FPackageName::LongPackageNameToFilename(NewPkg->GetName(), FPackageName::GetAssetPackageExtension());
+			IFileManager::Get().MakeDirectory(*FPaths::GetPath(AbsFilename), true);
+
+			// Save the new package to disk.
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			bool bSaved = UPackage::SavePackage(NewPkg, NewAsset, *AbsFilename, SaveArgs);
+			if (bSaved)
+			{
+				UE_LOG(LogSourceControl, Display, TEXT("Backup saved successfully to %s"), *AbsFilename);
+			}
+			else
+			{
+				UE_LOG(LogSourceControl, Error, TEXT("Failed to save backup to %s"), *AbsFilename);
+			}
+
+			return bSaved;
+		}
+
+		bool MakeSimpleOSCopyPackageBackup(const FString& OriginalFileFullPath, const FString& TargetBackupFolderPath) {
+			if (!FPaths::FileExists(OriginalFileFullPath))
+			{
+				UE_LOG(LogSourceControl, Error, TEXT("Original package file not found: %s"), *OriginalFileFullPath);
+				return false;
+			}
+
+			const FString BackupFileName = FPaths::GetBaseFilename(OriginalFileFullPath) + TEXT("_recovered");
+			int32 CopyResult = IFileManager::Get().Copy(*(TargetBackupFolderPath / BackupFileName), *OriginalFileFullPath);
+			if (CopyResult == COPY_OK)
+			{
+				UE_LOG(LogSourceControl, Log, TEXT("OS backup copy created successfully: %s"), *TargetBackupFolderPath);
+				return true;
+			}
+			else
+			{
+				UE_LOG(LogSourceControl, Error, TEXT("OS backup copy failed, error code: %d"), CopyResult);
+				return false;
+			}
+		}
+
 		UPackage* PackageFromPath(const FString& InPath)
 		{
 			FString PackageName;
@@ -84,7 +244,6 @@ namespace DiversionUtils
 			}
 			return Package;
 		}
-
 	}
 
 void PrintSupportNeededLogLine(const FString& InMessage, bool IsWarning)
@@ -148,7 +307,7 @@ bool StartDiversionAgent(const FString& InPathToDiversionBinary)
 		return Provider.IsAgentAlive(EConcurrency::Synchronous, true);
 	});
 
-	if (!DiversionUtils::WaitForCondition(WaitForAgentProcessDelegate, 5.0f, 1.0f)) {
+	if (!DiversionUtils::WaitForCondition(WaitForAgentProcessDelegate, 10.0f, 1.0f)) {
 		PrintSupportNeededLogLine("Diversion Sync-Agent failed to respond. Check Diversion tray icon or open Diversion Desktop to verify agent is up.");
 
 		return false;
@@ -313,18 +472,6 @@ FString RefToOrdinalId(const FString& RefId)
 	return RefId.RightChop(RefId.Find(TEXT("."), ESearchCase::IgnoreCase, ESearchDir::FromEnd) + 1);
 }
 
-bool HttpTick(double& LastHttpTickTime)
-{
-	if (!FModuleManager::Get().IsModuleLoaded("HTTP"))
-	{
-		return false;
-	}
-	const double AppTime = FPlatformTime::Seconds();
-	auto TickResult = FHttpModule::Get().GetHttpManager().Tick(float(AppTime - LastHttpTickTime));
-	LastHttpTickTime = AppTime;
-	return TickResult;
-}
-
 void ShowErrorNotification(const FText& ErrorMessage)
 {
 	FNotificationInfo Info(ErrorMessage);
@@ -373,14 +520,6 @@ FString GetFilePathFromAssetData(const FAssetData& AssetData)
 		AssetPath += TEXT(".uasset");
 	}
 	return AssetPath;
-}
-
-bool SleepAndTick(double& LastHttpTickTime) {
-	FPlatformProcess::Sleep(0.01f);
-	if ((ENGINE_MINOR_VERSION == 4) || IsInGameThread()) {
-		return DiversionUtils::HttpTick(LastHttpTickTime);
-	}
-	return false;
 }
 
 TSet<FString> GetPathsCommonPrefixes(const TArray<FString>& InPaths, const FString& InBaseRepoPath, int32 InLimit)
@@ -438,29 +577,6 @@ FString FindCommonAncestorDirectory(const TArray<FString>& InPaths)
 	return Result;
 }
 
-void WaitForHttpRequest(const double InMaxWaitingTimeoutSeconds, const FHttpRequestPtr InRequest, const FString& InAPICallName, const double InLogIntervalSeconds) {
-	double AppTime = FPlatformTime::Seconds();
-	double StartTime = FPlatformTime::Seconds();
-	double LastLogTime = FPlatformTime::Seconds();
-
-	while (EHttpRequestStatus::Processing == InRequest->GetStatus())
-	{
-		SleepAndTick(AppTime);
-		if (FPlatformTime::Seconds() > InMaxWaitingTimeoutSeconds + StartTime) {
-			// TODO: Remove this, probably introduced since Tick was not called outside game thread
-			UE_LOG(LogSourceControl, Error, TEXT("Aborting API call due to a long wait."));
-			break;
-		}
-
-		if (FPlatformTime::Seconds() > LastLogTime + InLogIntervalSeconds) {
-			UE_LOG(LogSourceControl, Display, TEXT("Waiting for API call: %s, to complete..."), *InAPICallName);
-			LastLogTime = FPlatformTime::Seconds();
-		}
-	}
-	
-	SleepAndTick(AppTime);
-}
-
 FString GetStackTrace()
 {
 	try {
@@ -511,6 +627,15 @@ bool DiversionValidityCheck(bool InCondition, FString InErrorDescription, const 
 	SendErrorToBE(AccountId, ErrorDescription, StackTrace);
 
 	return false;
+}
+
+TMap<FString, FString> GetDiversionHeaders()
+{
+	TMap<FString, FString> InHeaders;
+	InHeaders.Add(APP_VERSION_HEADER_KEY, FDiversionModule::GetPluginVersion());
+	InHeaders.Add(APP_NAME_HEADER_KEY, FDiversionModule::GetAppName());
+	InHeaders.Add(CORRELATION_ID_HEADER_KEY, FGuid::NewGuid().ToString());
+	return InHeaders;	
 }
 
 bool WaitForAgentSync(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, float InSecondsToTimeout) {

@@ -1,17 +1,9 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "SyncApiCall.h"
 #include "DiversionUtils.h"
 #include "DiversionCommand.h"
+#include "DiversionModule.h"
 
-#include "OpenAPIDefaultApi.h"
-#include "OpenAPIDefaultApiOperations.h"
-
-using namespace AgentAPI;
-
-using FWsSync = OpenAPIDefaultApi;
-
-class FSyncGetSyncProgress;
 
 const FString GenericInaccessiblePathMessgae = "Make sure the file is not being edited outside UE, is not 'readonly' or checked-out in other SCMs and you have the permissions to edit it";
 
@@ -31,30 +23,6 @@ FString PathErrorCodeToString(EPathErrorCode InErrorCode) {
 	}
 }
 
-
-using FGetSyncProgressAPI = TSyncApiCall<
-	FSyncGetSyncProgress,
-	FWsSync::GetSyncProgressRequest,
-	FWsSync::GetSyncProgressResponse,
-	FWsSync::FGetSyncProgressDelegate,
-	FWsSync,
-	&FWsSync::GetSyncProgress,
-	UnauthorizedCall,
-	// Output parameters
-	const FDiversionCommand&, /*InCommand*/
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>& /*InfoMessages*/
-	>;
-
-REGISTER_PARSE_TYPE(FSyncGetSyncProgress);
-
-class FSyncGetSyncProgress final : public FGetSyncProgressAPI {
-	friend FGetSyncProgressAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(const FDiversionCommand& InCommand,
-		TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FWsSync::GetSyncProgressResponse& Response);
-};
-
 bool IsPathWriteAccessible(const FString& Path)
 {
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
@@ -65,101 +33,107 @@ bool IsPathWriteAccessible(const FString& Path)
 	return !PlatformFile.IsReadOnly(*Path);
 }
 
+using namespace Diversion::AgentAPI;
 
-bool FSyncGetSyncProgress::ResponseImplementation(const FDiversionCommand& InCommand,
-	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FWsSync::GetSyncProgressResponse& Response) {
+bool DiversionUtils::GetWorkspaceSyncProgress(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages)
+{
 	IDiversionWorker& Worker = static_cast<IDiversionWorker&>(InCommand.Worker.Get());
 
-	if (!Response.IsSuccessful()) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
+	auto ErrorResponse = DefaultApi::FgetSyncProgressDelegate::Bind([&]() {
 		return false;
-	}
+	});
 
-	// Handle Locked Files
-	bool LockHandleFeatureFlag = Response.Content.EnableLockRelease.IsSet() ? Response.Content.EnableLockRelease.GetValue() : false;
-	if (LockHandleFeatureFlag) {
-		TArray<OpenAPIWorkspaceSyncProgressErrorPathsInner> ErrorPaths = 
-			Response.Content.ErrorPaths.IsSet() ? Response.Content.ErrorPaths.GetValue() : 
-			TArray<OpenAPIWorkspaceSyncProgressErrorPathsInner>();
-
-		auto OriginalWorkerSyncStatus = Worker.SyncStatus;
-		if (!ErrorPaths.IsEmpty()) {
-			// Tag the sync status as PathError 
-			Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::PathError;
+	auto VariantResponse = DefaultApi::FgetSyncProgressDelegate::Bind([&](const TVariant<TSharedPtr<WorkspaceSyncProgress>, void*>& Variant) {
+		if (!Variant.IsType<TSharedPtr<WorkspaceSyncProgress>>()) {
+			// Unexpected response type
+			OutErrorMessages.Add("Unexpected response type");
+			return false;
 		}
 
-		// Reset packages array 
-		Worker.LockedPackages.Empty();
+		auto Value = Variant.Get<TSharedPtr<WorkspaceSyncProgress>>();
+		// Handle Locked Files
+		bool LockHandleFeatureFlag = Value->mEnableLockRelease.IsSet() ? Value->mEnableLockRelease.GetValue() : false;
 
-		for (const auto& ErrorPath : ErrorPaths) {
-			if (!ErrorPath.ErrorCode.IsSet() || !ErrorPath.Path.IsSet()) {
-				// Skip if no error code or path available
-				continue;
+		if (LockHandleFeatureFlag) {
+			auto ErrorPaths = 
+				Value->mErrorPaths.IsSet() ? Value->mErrorPaths.GetValue() :
+				TArray<WorkspaceSyncProgress_ErrorPaths_inner>();
+
+			auto OriginalWorkerSyncStatus = Worker.SyncStatus;
+			if (!ErrorPaths.IsEmpty()) {
+				// Tag the sync status as PathError 
+				Worker.SyncStatus = DiversionUtils::EDiversionWsSyncStatus::PathError;
 			}
 
-			EPathErrorCode ErrorCode = static_cast<EPathErrorCode>(ErrorPath.ErrorCode.GetValue());
-			FString ErrorFilePath = ErrorPath.Path.GetValue();
+			// Reset packages array 
+			Worker.OpenedPackagePaths.Empty();
 
-			if (ErrorCode == EPathErrorCode::PathAccessDeniedError) {
-				if(ErrorFilePath.IsEmpty()) {
-					UE_LOG(LogSourceControl, Warning, TEXT("Sync got access denied error for an empty path, ignoring."));
-				}
-				
-				FString PackageName;
-				UPackage* Package;
-				FPackageName::TryConvertFilenameToLongPackageName(ErrorFilePath, PackageName);
-				
-				if (UE::IsSavingPackage(nullptr) || IsGarbageCollectingAndLockingUObjectHashTables()) {
-					// We mustn't access packages during serialization or GC
-					UE_LOG(LogSourceControl, Display,
-						TEXT("UE is currently saving or performing GC, skipping."), *ErrorFilePath);
-					break;
-				}
-				else {
-					Package = PackageName.IsEmpty() ? nullptr : FindPackage(nullptr, *PackageName);
+			for (const auto& ErrorPath : ErrorPaths) {
+				if (!ErrorPath.mErrorCode.IsSet() || !ErrorPath.mPath.IsSet()) {
+					// Skip if no error code or path available
+					continue;
 				}
 
-				if (Package != nullptr) {
-					Worker.LockedPackages.Add({ Package, ErrorFilePath });
-				}
-				else if (PackageName.IsEmpty()) {
-					UE_LOG(LogSourceControl, Warning,
-						TEXT("Sync got access denied error for path: '%s'. Paths is not an UE package. %s"), *ErrorFilePath, *GenericInaccessiblePathMessgae);
-				}
-				else {
-					if (IsPathWriteAccessible(ErrorFilePath)) {
-						// Sync is still in progress in the agent but the file was already released
-						// Safe to reset to the original worker sync status
-						Worker.SyncStatus = OriginalWorkerSyncStatus;
+				EPathErrorCode ErrorCode = static_cast<EPathErrorCode>(ErrorPath.mErrorCode.GetValue());
+				FString ErrorFilePath = ErrorPath.mPath.GetValue();
+
+				if (ErrorCode == EPathErrorCode::PathAccessDeniedError) {
+					if(ErrorFilePath.IsEmpty()) {
+						UE_LOG(LogSourceControl, Warning, TEXT("Sync got access denied error for an empty path, ignoring."));
+					}
+				
+					FString PackageName;
+					UPackage* Package;
+					FPackageName::TryConvertFilenameToLongPackageName(ErrorFilePath, PackageName);
+				
+					if (UE::IsSavingPackage(nullptr) || IsGarbageCollectingAndLockingUObjectHashTables()) {
+						// We mustn't access packages during serialization or GC
+						UE_LOG(LogSourceControl, Display,
+							TEXT("UE is currently saving or performing GC, skipping."), *ErrorFilePath);
+						break;
 					}
 					else {
-						UE_LOG(LogSourceControl, Warning, TEXT("Sync got access denied error for UE package in path: '%s'. %s."), *ErrorFilePath, *GenericInaccessiblePathMessgae);
+						Package = PackageName.IsEmpty() ? nullptr : FindPackage(nullptr, *PackageName);
+					}
+
+					if (Package != nullptr) {
+						Worker.OpenedPackagePaths.Add(ErrorFilePath);
+					}
+					else if (PackageName.IsEmpty()) {
+						UE_LOG(LogSourceControl, Warning,
+							TEXT("Sync got access denied error for path: '%s'. Paths is not an UE package. %s"), *ErrorFilePath, *GenericInaccessiblePathMessgae);
+					}
+					else {
+						if (IsPathWriteAccessible(ErrorFilePath)) {
+							// Sync is still in progress in the agent but the file was already released
+							// Safe to reset to the original worker sync status
+							Worker.SyncStatus = OriginalWorkerSyncStatus;
+						}
+						else {
+							UE_LOG(LogSourceControl, Warning, TEXT("Sync got access denied error for UE package in path: '%s'. %s."), *ErrorFilePath, *GenericInaccessiblePathMessgae);
+						}
 					}
 				}
-			}
-			else {
-				FString ErrStr = ErrorPath.ErrorString.IsSet() ? ErrorPath.ErrorString.GetValue() : PathErrorCodeToString(ErrorCode);
-				UE_LOG(LogSourceControl, Warning,
-					TEXT("Sync received error: %s on the path: '%s'."), *ErrStr, *ErrorFilePath);
+				else {
+					FString ErrStr = ErrorPath.mErrorString.IsSet() ? ErrorPath.mErrorString.GetValue() : PathErrorCodeToString(ErrorCode);
+					UE_LOG(LogSourceControl, Warning,
+						TEXT("Sync received error: %s on the path: '%s'."), *ErrStr, *ErrorFilePath);
+				}
 			}
 		}
-	}
-	else {
-		if (Response.Content.LastErr.IsSet()) {
-			AddErrorMessage(Response.Content.LastErr.GetValue(), OutErrorMessages);
+		else {
+			if (Value->mLastErr.IsSet()) {
+				const FString ErrMsg = FString::Printf(TEXT("call to GetSyncProgress Failed: %s"), *Value->mLastErr.GetValue());
+				UE_LOG(LogSourceControl, Error, TEXT("%s"), *ErrMsg);
+				OutErrorMessages.Add(ErrMsg);
+
+				return false;
+			}
 		}
-	}
-	
-	return true;
-}
 
-bool DiversionUtils::WorkspaceSyncProgress(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages)
-{
-	auto Request = FWsSync::GetSyncProgressRequest();
-	Request.RepoID = InCommand.WsInfo.RepoID;
-	Request.WorkspaceID = InCommand.WsInfo.WorkspaceID;
+		return true;
+	});
 
-	auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncGetSyncProgress>();
-	return ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand, OutInfoMessages, OutErrorMessages);
+	return FDiversionModule::Get().AgentAPIRequestManager->GetSyncProgress(InCommand.WsInfo.RepoID, InCommand.WsInfo.WorkspaceID, FString(), {}, 5, 5)
+		.HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
 }

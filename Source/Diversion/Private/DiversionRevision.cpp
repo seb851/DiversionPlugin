@@ -7,6 +7,7 @@
 #include "Misc/Paths.h"
 #include "DiversionModule.h"
 #include "DiversionUtils.h"
+#include "ScopedSourceControlProgress.h"
 
 #define LOCTEXT_NAMESPACE "Diversion"
 
@@ -37,7 +38,6 @@ bool FDiversionRevision::Get(FString& InOutFilename, EConcurrency::Type InConcur
 	}
 	else
 	{
-		// TODO: error message handling
 		TArray<FString> InfoMessages;
 		TArray<FString> ErrorMessages;
 		bCommandSuccessful = DiversionUtils::DownloadBlob(InfoMessages, ErrorMessages, CommitId, InOutFilename, Filename, WsInfo);

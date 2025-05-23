@@ -22,7 +22,7 @@ FDiversionCommand::FDiversionCommand(const TSharedRef<class ISourceControlOperat
 	// Get the latest values - revalidate the cache
 	WsInfo = Provider.GetWsInfo();
 	IsAgentAlive = Provider.IsAgentAlive();
-	ConflictedFiles = Provider.ConflictedFiles;
+	Provider.GetConflictedFilesPaths(ConflictedFiles);
 	Provider.GetCurrentPotentialClashes(ExistingPotentialConflicts);
 	SyncStatus = Provider.GetSyncStatus();
 }

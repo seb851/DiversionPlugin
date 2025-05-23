@@ -7,7 +7,10 @@
 #include "IDiversionWorker.h"
 #include "DiversionVersion.h"
 #include "CachedState.h"
+#include "DiversionChangelistState.h"
 #include "DiversionTimedDelegate.h"
+#include "CustomWidgets/NotificationManager.h"
+#include "IDirectoryWatcher.h"
 
 class FDiversionState;
 
@@ -19,10 +22,12 @@ DECLARE_DELEGATE_RetVal(FDiversionWorkerRef, FGetDiversionWorker)
 class FDiversionProvider : public ISourceControlProvider
 {
 public:
-	FDiversionProvider() : LastHttpTickTime(0),
-	                       DvVersion(FDiversionVersion(""), FTimespan::FromSeconds(1)),
-	                       WsInfo(WorkspaceInfo(), FTimespan::FromSeconds(1)),
-	                       SyncStatus(DiversionUtils::EDiversionWsSyncStatus::Paused, FTimespan::FromSeconds(1))
+	FDiversionProvider() : DvVersion(FDiversionVersion(""), FTimespan::FromSeconds(3)),
+	                       WsInfo(WorkspaceInfo(), FTimespan::FromSeconds(3)),
+	                       SyncStatus(DiversionUtils::EDiversionWsSyncStatus::Paused, FTimespan::FromSeconds(1)),
+						   bRepoWithSameNameExists(false, FTimespan::FromSeconds(15)),  // BE call - slow interval
+						   bWorkspaceExistsInPath(false, FTimespan::FromSeconds(2)),
+						   ChangelistState(MakeShared<FDiversionChangelistState>())
 	{
 	}
 
@@ -142,12 +147,44 @@ public:
 		return WsInfo.Get().WorkspaceID;
 	}
 
+	void SetWorkspaceMergesList(const TArray<Diversion::CoreAPI::Model::Merge>& InList)
+	{
+		WorkspaceMergeList = InList;
+	}
 
+	const TArray<Diversion::CoreAPI::Model::Merge>& GetWorkspaceMergesList() const
+	{
+		return WorkspaceMergeList;
+	}
+	
+	void SetBranchMergesList(const TArray<Diversion::CoreAPI::Model::Merge>& InList)
+	{
+		BranchMergeList = InList;
+	}
+
+	const TArray<Diversion::CoreAPI::Model::Merge>& GetBranchMergesList() const
+	{
+		return BranchMergeList;
+	}
+
+	void ShowNotification(const FDiversionNotification& Notification) {
+		NotificationManager.ShowNotification(Notification);
+	}
 
 private:
 
+#pragma region PotentialClashesUIExtension
+
+	/** Delegate handle for the potential clash UI icon that was added to the AssetViewExtraStateGenerator */
+	FDelegateHandle PotentialClashUIIconDelegateHandle;
+	TSharedRef<SWidget> OnGenerateAssetViewPotentialClashIcon(const FAssetData& AssetData);
+	TSharedRef<SWidget> OnGenerateAssetViewPotentialClashTooltip(const FAssetData& AssetData);
+
+#pragma endregion
+
 	/** Is dv binary found and working. */
 	bool bDiversionAvailable = false;
+	bool bDiversionStopped = false;
 
 	/** Helper function for Execute() */
 	TSharedPtr<class IDiversionWorker, ESPMode::ThreadSafe> CreateWorker(const FName& InOperationName) const;
@@ -158,7 +195,7 @@ private:
 	ECommandResult::Type IssueCommand(class FDiversionCommand& InCommand);
 
 	/** Output any messages this command holds */
-	void OutputCommandMessages(const class FDiversionCommand& InCommand) const;
+	void OutputCommandMessages(const class FDiversionCommand& InCommand);
 
 	/** Version of the Diversion plugin */
 	FString PluginVersion;
@@ -177,9 +214,6 @@ private:
 	/** For notifying when the version control states in the cache have changed */
 	FSourceControlStateChanged OnSourceControlStateChanged;
 
-	/** Time of the last HTTP manager tick call*/
-	double LastHttpTickTime;
-
 	TCached<FDiversionVersion> DvVersion;
 	TCached<WorkspaceInfo> WsInfo;
 	TCached<DiversionUtils::EDiversionWsSyncStatus> SyncStatus;
@@ -189,15 +223,65 @@ private:
 		"AgentHealthCheck",
 		"GetWsInfo",
 		"InitRepo",
-		"SendAnalytics"
+		"SendAnalytics",
+		"CheckIfWorkspaceExistsInPath",
+		"CheckForRepoWithSameName"
 	};
 
+	/** Saves undismissed Diversion generated notifications */
+	FDiversionNotificationManager NotificationManager;
+// TODO: Make sure this is necessary 
 public:
 	TMap<FString, FDiversionResolveInfo> ConflictedFiles;
+#pragma region MergeConflictsMembers
+	TArray<Diversion::CoreAPI::Model::Merge> WorkspaceMergeList;
+	TArray<Diversion::CoreAPI::Model::Merge> BranchMergeList;
 	TMap<FString, FDiversionResolveInfo> FilesToResolve;
 	TArray<FString> FilesToRevert;
 	void OnPackageSave(const FString& PackageFileName, UObject* Outer);
+	void OnPrePackageSave(UPackage*, FObjectPreSaveContext);
+#pragma endregion
 
+#pragma region UnrealOpenedFiles
+	/**
+	 * Fucntions and members for handling files opened(and FS-locked) by UE
+	 * that diversion tries to sync incoming changes for.
+	 */
+
+public:
+	bool TryUnloadingOpenedPackage(const FString& InOpenedPackagePath);
+
+	// Functions to interact with the restoring files after sync delegates
+	int AddRestoreAfterSyncDelegateHandle();
+	FDelegateHandle& GetRestoreAfterSyncDelegateHandle(int DelegateHandleIndex);
+	void RemoveRestoreAfterSyncDelegateHandle(int DelegateHandleIndex);
+	
+private:
+
+	bool ReleaseLockedPackage(UPackage* Package, const FString& PackagePath);
+	// Functions to handle unsaved packages
+	void HandleUnsavedPackage(UPackage* Package, const FString& PackagePath, const FString& PackageName);
+	TArray<FDelegateHandle> DirectoryWatcherHandles;
+
+	// Function to handle opened in editor packages
+	void HandleOpenedInEditorPackage(UPackage* Package, const FString& PackagePath, const FString& PackageName);
+
+	// Adds a package to the list of packages that are locked by UE and are being synched by Diversion
+	void AddAndNotifySyncInaccessiblePackage(const FString& Path, const FDiversionNotification& InNotificationInfo);
+	void RemoveSyncInaccessiblePackage(const FString& Path);
+	bool GetSyncInaccessiblePackages(const FString& PackagePath);
+	
+	struct FSyncInaccessiblePackages
+	{
+		FDiversionNotificationManager::FNotificationId NotificationId;
+		FDateTime LockTime;
+	};
+	TMap<FString, FSyncInaccessiblePackages> SyncInaccessiblePackages;
+	// Time to invalidate entries in SyncInaccessiblePackages
+	const FTimespan SyncInaccessiblePackageRefreshTime = FTimespan::FromSeconds(30);
+	bool IsPackageExpired(const FSyncInaccessiblePackages& SyncInaccessiblePackage) const;
+#pragma endregion
+	
 #pragma region StatesCache
 public:
 	
@@ -208,20 +292,44 @@ public:
 	 * @param InConflictedFiles - Conflicted paths to update the states of
 	 * @returns true if any states were updated
 	 */
-	bool UpdateCachedStates(const TMap<FString, FDiversionState>& InNewStates, bool IsFullStatusUpdate,
-	const TMap<FString, FDiversionResolveInfo>& InConflictedFiles);
+	bool UpdateCachedStates(const TMap<FString, FDiversionState>& InNewStates, bool IsFullStatusUpdate);
+
+	/**
+	 * Updates the states with the conflicted data of current open merges.
+	 * @param InConflictedFiles 
+	 * @param IsFullStatusUpdate 
+	 * @return True if any state was updated
+	 */
+	bool UpdateConflictedStates(const TMap<FString, FDiversionResolveInfo>& ConflictedFilesData);
+
+	/**
+	 * Helper function to remove a conflict data from a state in the cache.
+	 * @param Path - Path of the file to remove the conflict data from
+	 * @returns true if any states were updated
+	 */
+	bool RemoveConflictedState(const FString& Path);
+
+	/**
+	 * Retrieves the resolve information for a given file path.
+	 * @param Path - The path of the file to get the resolve information for.
+	 * @return The resolve information for the specified file.
+	 */
+	TUniquePtr<FDiversionResolveInfo> GetFileResolveInfo(const FString& Path) const;
+	/**
+	 * Helper function to get the paths values of conflicted files.
+	 * @param OutArray - Array to fill with the conflicted files paths
+	 */
+	void GetConflictedFilesPaths(TArray<FString>& OutArray) const;
 	
+	void SetFilesToResolve(const TMap<FString, FDiversionResolveInfo>& InFilesToResolve);
 	/**
 	 * Helper function for various commands to update states with their potential clashes status.
 	 * @param InPotentialClashes - Potential clashes to update the states with
 	 *                             Will remove the potential clash info from local cache if its empty (Num==0).
 	 * @returns true if any states were updated
 	 */
-	bool UpdatePotentialConflictStates(const TMap<FString, TArray<EDiversionPotentialClashInfo>>& InPotentialClashes,
+	bool UpdatePotentialClashedStates(const TMap<FString, TArray<EDiversionPotentialClashInfo>>& InPotentialClashes,
 		bool IsFullStatusUpdate);
-
-	// This is currently being updated by the local conflicted files list
-	void UpdateConflictedStates();
 	
 	void GetCurrentPotentialClashes(TArray<FString>& OutPotentialClashedPaths) const;
 	
@@ -229,7 +337,7 @@ public:
 	TSharedRef<FDiversionState, ESPMode::ThreadSafe> GetStateInternal(const FString& Filename);
 
 	/** Adds a state to the synching states cache */
-	void AddSynchingState(const FString& Path, const TSharedRef<class FDiversionState>& InState);
+	void AddSyncingState(const FString& Path, const TSharedRef<class FDiversionState>& InState);
 
 // Background status triggering functions
 	// Use when want to mark BG status as called and wait for next interval
@@ -243,7 +351,11 @@ public:
 		BackgroundStatus->TriggerInstantCallAndReset();
 	}
 //
-	
+	void BackgroundConflictedFilesSkipToNextInterval()
+	{
+		BackgroundConflictedFiles->SkipToNextInterval();
+	}
+
 private:
 	/** Helper function for UpdateCachedStates. Updates the modified states cache.
 	 * @param InNewModifiedStates - new states to update the cache with
@@ -258,14 +370,44 @@ private:
 	/** Tracking modified states - enables resetting the changes to apply external to UE changes too */
 	TMap<FString, TSharedRef<FDiversionState>> ModifiedStates;
 	/** Tracking potential clashes - this used to keep track of resolved potential clashes*/
-	TMap<FString, TSharedRef<FDiversionState>> PotentialClashesCache;
+	TMap<FString, TSharedRef<FDiversionState>> PotentiallyClashedStates;
 	/** Tracking synching states - enables restting them once finished synching */
 	TMap<FString, TSharedRef<FDiversionState>> SynchingStates;
+	/** Tracking conflicted states - enables restting them once finished resolving/Updating conflicts data */
+	TMap<FString, TSharedRef<FDiversionState>> ConflictedStates;
 
 // Background status triggering variables
 	TUniquePtr<FTimedDelegateWrapper> BackgroundStatus = nullptr;
-	TUniquePtr<FTimedDelegateWrapper> BackgroundPotentialConflicts = nullptr;
+	TUniquePtr<FTimedDelegateWrapper> BackgroundPotentialClashes = nullptr;
+	TUniquePtr<FTimedDelegateWrapper> BackgroundConflictedFiles = nullptr;
 //
+
 #pragma endregion
 
+#pragma region InitializationStatusCache
+public:
+	bool IsRepoWithSameNameExists(const FString& RepoName, EConcurrency::Type Concurrency, bool InForceUpdate);
+	bool IsWorkspaceExistsInPath(const FString& RepoName, const FString& Path, EConcurrency::Type Concurrency, bool InForceUpdate);
+
+	// To be used by the API calls
+	void SetRepoWithSameNameExists(bool InValue) {
+		bRepoWithSameNameExists.Set(InValue);
+	}
+	void SetWorkspaceExistsInPath(bool InValue) {
+		bWorkspaceExistsInPath.Set(InValue);
+	}
+
+private:
+	TCached<bool> bRepoWithSameNameExists;
+	TCached<bool> bWorkspaceExistsInPath;
+#pragma endregion
+
+#pragma region changelists
+public:
+	void AddCurrentChangesToChangelistState();
+
+private:
+	TSharedRef<FDiversionChangelistState> ChangelistState;
+#pragma endregion
+	
 };

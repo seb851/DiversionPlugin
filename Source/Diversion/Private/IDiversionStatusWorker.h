@@ -3,7 +3,6 @@
 #pragma once
 
 #include "IDiversionWorker.h"
-#include "OpenAPIMerge.h"
 #include "DiversionState.h"
 
 
@@ -14,20 +13,14 @@
 class IDiversionStatusWorker : public IDiversionWorker
 {
 public:
-	/** Temporary Merges for results */
-	TArray<CoreAPI::OpenAPIMerge> Merges;
+	/** flag to indicate if the workspace contains conflicts and needs to be manually updated */
+	bool WorkspaceUpdateRequired;
 
 	/** Temporary states for results */
 	TMap<FString, FDiversionState> States;
 
 	/** Map of filenames to history */
 	TMap<FString, TDiversionHistory> Histories;
-
-	/** Map of filenames to conflict data*/
-	TMap<FString, FDiversionResolveInfo> Conflicts;
-
-	/** Temporary OnGoingMerge value to update back the provider*/
-	bool OutOnGoingMerge = false;
 
 	/** Store the number of items fetched for offset tracking - pagination system*/
 	int ItemsFetchedNum = 0;

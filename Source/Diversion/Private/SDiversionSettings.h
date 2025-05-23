@@ -4,6 +4,9 @@
 
 #include "Widgets/SCompoundWidget.h"
 #include "ISourceControlProvider.h"
+#include "DiversionTimedDelegate.h"
+
+class FDiversionProvider;
 
 class SNotificationItem;
 namespace ETextCommit { enum Type : int; }
@@ -22,12 +25,11 @@ public:
 	virtual ~SDiversionSettings() override;
 
 private:
-	FText GetInitialCommitMessage() const { return InitialCommitMessage; }
 	FString GetRepoPathString() const { return RepoPath; }
-
-	FText InitialCommitMessage = FText::FromString("Initial Unreal Engine commit");
 	FString RepoPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	bool bInitialCommit = true;
+
+	FString GetRepoNameString() const { return RepoName; }
+	FString RepoName = TEXT("");
 
 	FText GetVersions() const;
 	/** Delegate to get repository root and email from provider */
@@ -43,40 +45,46 @@ private:
 	void RemoveInProgressNotification();
 	void DisplayInfoNotification(const FString& NotificationText);
 	void DisplaySuccessNotification(const FSourceControlOperationRef& InOperation);
-	void DisplayFailureNotification(const FSourceControlOperationRef& InOperation);
-	void DisplayFailureNotification(const FText& Message) const;
 
-	void LaunchCommitOperation();
 
 private:
 	// Widget functions
 	TSharedRef<SWidget> MakeSettingsPanel();
 	TSharedRef<SWidget> DiversionNotInstalledWidget();
+	TSharedRef<SWidget> RepoWithSameNameExistsWidget();
 	TSharedRef<SWidget> DiversionRunAgentWidget();
 	TSharedRef<SWidget> ShowVersionWidget();
 	TSharedRef<SWidget> DiversionExistingRepoWidget(const FText& RepositoryRootLabel, const FText& RepositoryRootLabel_Tooltip);
 	TSharedRef<SWidget> RootOfLocalDirectoryTextbox(const FText& RepositoryRootLabel_Tooltip);
 	TSharedRef<SWidget> DiversionInitializeRepoWidget(const FText& RepositoryRootLabel, const FText& RepositoryRootLabel_Tooltip);
-	TSharedRef<SWidget> AddInitialCommit();
 	TSharedRef<SWidget> AddInitializeButton();
 
 	enum SettingsState
 	{
 		StartAgent,
+		RepoWithSameNameAlreadyExists,
 		RepoCreation,
 		RepoInitialized
 	};
 
-	static SettingsState SettingCurrentScreen();
+	SettingsState SettingCurrentScreen();
 
 private:
 	// Click event handlers
 	FReply OnClickedOpenDiversionQuickstart() const;
 	FReply OnClickedStartDiversionAgent() const;
-	/** Delegate to initialize a new Diversion repository */
 	FReply OnClickedInitializeDiversionRepository();
+	FReply OnClickedOpenDiversionRepoWithSameNameExists() const;
+	void OnProjectPathPicked(const FString& InRepoPath) { 
+		RepoPath = InRepoPath;
+		NormalizeRepoPath();
+		RepoName = FPaths::GetPathLeaf(RepoPath);
+	}
 
-	void OnCheckedInitialCommit(ECheckBoxState CheckBoxState) { bInitialCommit = CheckBoxState == ECheckBoxState::Checked; }
-	void OnInitialCommitMessageCommited(const FText& Text, ETextCommit::Type Arg) { InitialCommitMessage = Text; }
-	void OnProjectPathPicked(const FString& String) { RepoPath = String; }
+
+	// We don't use the Utils absolute path since the repo isn't considered initialized yet
+	FString NormalizeRepoPath() const;
+
+private:
+	FDiversionProvider* SourceControlProvider = nullptr;
 };

@@ -116,6 +116,14 @@ FSlateIcon FDiversionState::GetIcon() const
 	{
 		return FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl.Actions.Refresh");
 	}
+	if(IsConflicted())
+	{
+		if(PendingResolveInfo.ResolutionSide.IsSet())
+		{
+			return FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl.ConflictResolution.Clear");	
+		}
+		return FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl.Conflicted");
+	}
 	
 	switch (WorkingCopyState)
 	{
@@ -129,8 +137,6 @@ FSlateIcon FDiversionState::GetIcon() const
 	case EWorkingCopyState::Deleted: // Deleted & Missing files does not show in Content Browser
 	case EWorkingCopyState::Missing:
 		return FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl.MarkedForDelete");
-	case EWorkingCopyState::Conflicted:
-		return FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl.Conflicted");
 	case EWorkingCopyState::NotControlled:
 		return FSlateIcon(FRevisionControlStyleManager::GetStyleSetName(), "RevisionControl.NotInDepot");
 	case EWorkingCopyState::Unknown:
@@ -147,6 +153,10 @@ FText FDiversionState::GetDisplayName() const
 	if (IsSyncing)
 	{
 		return LOCTEXT("Syncing", "Syncing");
+	}
+	if(IsConflicted())
+	{
+		return LOCTEXT("ContentsConflict", "Contents Conflict");
 	}
 	
 	switch(WorkingCopyState)
@@ -165,8 +175,6 @@ FText FDiversionState::GetDisplayName() const
 		return LOCTEXT("Renamed", "Renamed");
 	case EWorkingCopyState::Copied:
 		return LOCTEXT("Copied", "Copied");
-	case EWorkingCopyState::Conflicted:
-		return LOCTEXT("ContentsConflict", "Contents Conflict");
 	case EWorkingCopyState::Ignored:
 		return LOCTEXT("Ignored", "Ignored");
 	case EWorkingCopyState::NotControlled:
@@ -183,6 +191,22 @@ FText FDiversionState::GetDisplayTooltip() const
 	if(IsSyncing)
 	{
 		return LOCTEXT("Syncing_Tooltip", "Syncing item state with the server");
+	}
+	if(IsConflicted())
+	{
+		if(PendingResolveInfo.ResolutionSide.IsSet())
+		{
+			switch (PendingResolveInfo.ResolutionSide.GetValue())
+			{
+				case Diversion::CoreAPI::Conflict::Resolved_sideEnum::BASE:
+					return LOCTEXT("ContentsConflict_Tooltip_AcceptCurrent", "File conflict resolved to 'Current'.");
+				case Diversion::CoreAPI::Conflict::Resolved_sideEnum::OTHER:
+					return LOCTEXT("ContentsConflict_Tooltip_AcceptIncoming", "File conflict resolved to 'Incoming'.");
+				case Diversion::CoreAPI::Conflict::Resolved_sideEnum::RESULT:
+					return LOCTEXT("ContentsConflict_Tooltip_AcceptCombined", "File conflict resolved to 'Combined'.");
+			}
+		}
+		return LOCTEXT("ContentsConflict_Tooltip", "The contents of the item conflict with updates received from the repository.");
 	}
 	
 	switch(WorkingCopyState)
@@ -201,8 +225,6 @@ FText FDiversionState::GetDisplayTooltip() const
 		return LOCTEXT("Renamed_Tooltip", "Item has been renamed");
 	case EWorkingCopyState::Copied:
 		return LOCTEXT("Copied_Tooltip", "Item has been copied");
-	case EWorkingCopyState::Conflicted:
-		return LOCTEXT("ContentsConflict_Tooltip", "The contents of the item conflict with updates received from the repository.");
 	case EWorkingCopyState::Ignored:
 		return LOCTEXT("Ignored_Tooltip", "Item is being ignored.");
 	case EWorkingCopyState::NotControlled:
@@ -252,7 +274,7 @@ bool FDiversionState::IsCheckedOutOther(FString* Who) const
 	return
 		IsDiversionSoftLockEnabled() && // Disable this feature if the user wants to
 		(PotentialClashes.GetPotentialClashesCount() > 0) &&
-		WorkingCopyState != EWorkingCopyState::Conflicted; // If the file is already conflicted, we don't want to auto lock it
+		!IsConflicted(); // If the file is already conflicted, we don't want to auto lock it
 }
 
 bool FDiversionState::IsCurrent() const
@@ -315,7 +337,6 @@ bool FDiversionState::IsModified() const
 		|| WorkingCopyState == EWorkingCopyState::Modified
 		|| WorkingCopyState == EWorkingCopyState::Renamed
 		|| WorkingCopyState == EWorkingCopyState::Copied
-		|| WorkingCopyState == EWorkingCopyState::Conflicted
 		|| WorkingCopyState == EWorkingCopyState::Missing;
 }
 
@@ -327,7 +348,7 @@ bool FDiversionState::CanAdd() const
 
 bool FDiversionState::IsConflicted() const
 {
-	return WorkingCopyState == EWorkingCopyState::Conflicted;
+	return PendingResolveInfo;
 }
 
 bool FDiversionState::CanRevert() const
@@ -368,6 +389,22 @@ FString FDiversionState::GetOtherEditorsList() const {
 		}
 	}
 	return OtherEditors;
+}
+
+void FDiversionState::ClearResolveInfo()
+{
+	PendingResolveInfo.RemoteRevision.Empty();
+	PendingResolveInfo.RemoteFile.Empty();
+}
+
+const FDiversionResolveInfo& FDiversionState::GetPendingResolveInfo() const
+{
+	return PendingResolveInfo;
+}
+
+void FDiversionState::AddPendingResolveInfo(const FDiversionResolveInfo& InResolveInfo)
+{
+	PendingResolveInfo = InResolveInfo;
 }
 
 #undef LOCTEXT_NAMESPACE

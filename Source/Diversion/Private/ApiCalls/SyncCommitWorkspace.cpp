@@ -1,68 +1,60 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "SyncApiCall.h"
-
-#include "ISourceControlModule.h"
-#include "Logging/StructuredLog.h"
-
 #include "DiversionUtils.h"
-#include "DiversionModule.h"
 #include "DiversionCommand.h"
-
-#include "OpenAPIRepositoryCommitManipulationApi.h"
-#include "OpenAPIRepositoryCommitManipulationApiOperations.h"
-
-using namespace CoreAPI;
-using FCommit = OpenAPIRepositoryCommitManipulationApi;
-
-class FSyncCommitWorkspace;
-using FCommitWorkspaceSyncAPI = TSyncApiCall<
-	FSyncCommitWorkspace,
-	FCommit::SrcHandlersv2WorkspaceCommitWorkspaceRequest,
-	FCommit::SrcHandlersv2WorkspaceCommitWorkspaceResponse,
-	FCommit::FSrcHandlersv2WorkspaceCommitWorkspaceDelegate,
-	FCommit,
-	&FCommit::SrcHandlersv2WorkspaceCommitWorkspace,
-	AuthorizedCall,
-	// 	ResponseImplementation arguments types
-	FDiversionCommand&, /*InCommand*/
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>& /*InfoMessages*/>;
-	//FDiversionCommand&,TArray<FString>& ,TArray<FDiversionState>&>;
-
-class FSyncCommitWorkspace final : public FCommitWorkspaceSyncAPI {
-	friend FCommitWorkspaceSyncAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(FDiversionCommand& InCommand,
-		TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FCommit::SrcHandlersv2WorkspaceCommitWorkspaceResponse& Response);
-};
-REGISTER_PARSE_TYPE(FSyncCommitWorkspace);
+#include "DiversionModule.h"
+#include "DiversionOperations.h"
 
 
-bool FSyncCommitWorkspace::ResponseImplementation(FDiversionCommand& InCommand,
-	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FCommit::SrcHandlersv2WorkspaceCommitWorkspaceResponse& Response)
-{
-	if (!Response.IsSuccessful()) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
-		return false;
-	}
+#define LOCTEXT_NAMESPACE "Diversion"
 
-	InCommand.InfoMessages.Add(Response.GetResponseString());
-	return true;
-}
+
+using namespace Diversion::CoreAPI;
+
 
 bool DiversionUtils::RunCommit(FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FString& InDescription, bool WaitForSync)
 {
+	const auto ErrorResponse = RepositoryCommitManipulationApi::Fsrc_handlersv2_workspace_commitWorkspaceDelegate::Bind(
+		[&](const TVariant<TSharedPtr<NewCommit>, void*, TSharedPtr<Src_handlersv2_workspace_commit_workspace_400_response>, TSharedPtr<Diversion::CoreAPI::Error>>&, int StatusCode) {
+			const FText COMMIT_CONFLICT_ERROR_NOTIFICATION_MESSAGE = FText::FromString(
+				"Unable to commit due to existing conflicts, "
+				"please run update using the button below or the Diversion "
+				"desktop app and resolve the conflicts to continue.");
+
+			FNotificationButtonInfo UpdateButton(LOCTEXT("DiversionPopup_UpdateButton", "Update"),
+				LOCTEXT("DiversionPopup_UpdateButton_Tooltip", "Update the workspace to show pull current changes and conflicts"),
+				FSimpleDelegate::CreateLambda([]()
+					{
+						FDiversionModule::Get().GetProvider().Execute(ISourceControlOperation::Create<FUpdateWorkspaceOperation>(),
+							nullptr, {}, EConcurrency::Asynchronous);
+					}),
+				SNotificationItem::CS_Fail);
+			
+			if (StatusCode == 409) {
+				InCommand.PopupNotification = MakeUnique<FDiversionNotification>(
+					COMMIT_CONFLICT_ERROR_NOTIFICATION_MESSAGE,
+					TArray<FNotificationButtonInfo>({ UpdateButton }),SNotificationItem::CS_Fail);
+			}
+			return false;
+		}
+	);
+
+	const auto VariantResponse = RepositoryCommitManipulationApi::Fsrc_handlersv2_workspace_commitWorkspaceDelegate::Bind(
+		[&](const TVariant<TSharedPtr<NewCommit>, void*, TSharedPtr<Src_handlersv2_workspace_commit_workspace_400_response>, TSharedPtr<Diversion::CoreAPI::Error>>& Variant) {
+			if (Variant.IsType<TSharedPtr<NewCommit>>()) {
+				const auto Response = Variant.Get<TSharedPtr<NewCommit>>();
+				InCommand.InfoMessages.Add(FString::Printf(TEXT("Commit %s was added successfully"), *Response->mId));
+				return true;
+			}
+
+			return true;
+		}
+	);
+
 	if (WaitForSync && !WaitForAgentSync(InCommand, OutInfoMessages, OutErrorMessages))
 	{
 		return false;
 	}
-
-	auto Request = FCommit::SrcHandlersv2WorkspaceCommitWorkspaceRequest();
-	Request.RepoId = InCommand.WsInfo.RepoID;
-	Request.WorkspaceId = InCommand.WsInfo.WorkspaceID;
-	Request.OpenAPICommitRequest.CommitMessage = InDescription;
 
 	TOptional<TArray<FString>> CommitPaths;
 	if (InCommand.Files.Num() > 0) {
@@ -76,8 +68,12 @@ bool DiversionUtils::RunCommit(FDiversionCommand& InCommand, TArray<FString>& Ou
 		CommitPaths->Add(RelativeFilePath);
 	}
 
-	Request.OpenAPICommitRequest.IncludePaths = CommitPaths;
+	const TSharedPtr<CommitRequest> Request = MakeShared<CommitRequest>();
+	Request->mCommit_message = InDescription;
+	Request->mInclude_paths = CommitPaths;
 
-	auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncCommitWorkspace>();
-	return ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand, OutInfoMessages, OutErrorMessages);
+	return FDiversionModule::Get().RepositoryCommitManipulationAPIRequestManager->SrcHandlersv2WorkspaceCommitWorkspace(InCommand.WsInfo.RepoID, InCommand.WsInfo.WorkspaceID, Request, 
+		FDiversionModule::Get().GetAccessToken(InCommand.WsInfo.AccountID), {}, 5, 120).HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
 }
+
+#undef LOCTEXT_NAMESPACE

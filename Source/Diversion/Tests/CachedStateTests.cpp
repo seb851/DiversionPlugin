@@ -6,7 +6,7 @@
 DEFINE_LOG_CATEGORY_STATIC(LogCachedStateTests, Log, All);
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCachedStateTestGetValid, "Diversion.Tests.CachedState.GetValid",
-                                 EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 
 bool FCachedStateTestGetValid::RunTest(const FString& Parameters)
@@ -18,7 +18,7 @@ bool FCachedStateTestGetValid::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCachedStateTestSetGetValid, "Diversion.Tests.CachedState.SetGetValid",
-								 EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 bool FCachedStateTestSetGetValid::RunTest(const FString& Parameters)
 {
@@ -33,7 +33,7 @@ bool FCachedStateTestSetGetValid::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCachedStateTestSetGetValidTimeout, "Diversion.Tests.CachedState.SetGetValidTimeout",
-								 EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 bool FCachedStateTestSetGetValidTimeout::RunTest(const FString& Parameters)
 {
@@ -50,7 +50,7 @@ bool FCachedStateTestSetGetValidTimeout::RunTest(const FString& Parameters)
 
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCachedStateTestGetUpdate, "Diversion.Tests.CachedState.GetUpdate",
-								 EAutomationTestFlags::ApplicationContextMask | EAutomationTestFlags::ProductFilter)
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 bool FCachedStateTestGetUpdate::RunTest(const FString& Parameters)
 {

@@ -1,70 +1,47 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "SyncApiCall.h"
 #include "DiversionUtils.h"
 #include "DiversionCommand.h"
-
-#include "OpenAPIRepositoryWorkspaceManipulationApi.h"
-#include "OpenAPIRepositoryWorkspaceManipulationApiOperations.h"
+#include "DiversionModule.h"
 
 
-using namespace CoreAPI;
-
-using FReset = OpenAPIRepositoryWorkspaceManipulationApi;
-
-class FSyncReset;
-using FResetAPI = TSyncApiCall<
-	FSyncReset,
-	FReset::SrcHandlersv2WorkspaceResetRequest,
-	FReset::SrcHandlersv2WorkspaceResetResponse,
-	FReset::FSrcHandlersv2WorkspaceResetDelegate,
-	FReset,
-	&FReset::SrcHandlersv2WorkspaceReset,
-	AuthorizedCall,
-	// 	ResponseImplementation arguments types
-	FDiversionWorkerRef, /*Worker*/
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>& /*InfoMessages*/>;
-
-
-class FSyncReset final : public FResetAPI {
-	friend FResetAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(FDiversionWorkerRef InOutWorker, TArray<FString>& OutInfoMessages,
-		TArray<FString>& OutErrorMessages, const FReset::SrcHandlersv2WorkspaceResetResponse& Response);
-};
-REGISTER_PARSE_TYPE(FSyncReset);
-
-bool FSyncReset::ResponseImplementation(FDiversionWorkerRef InOutWorker, TArray<FString>& OutInfoMessages,
-	TArray<FString>& OutErrorMessages, const FReset::SrcHandlersv2WorkspaceResetResponse& Response) {
-	if (!Response.IsSuccessful() || (Response.GetHttpResponseCode() != EHttpResponseCodes::Ok)) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
-		return false;
-	}
-	// TODO: compare response to the expected response?
-	// TODO: print the paths that were reset
-	OutInfoMessages.Add("Successfully reset path(s)");
-	return true;
-}
+using namespace Diversion::CoreAPI;
 
 
 bool DiversionUtils::RunReset(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages)
 {
-	auto Request = FReset::SrcHandlersv2WorkspaceResetRequest();
-	Request.RepoId = InCommand.WsInfo.RepoID;
-	Request.WorkspaceId = InCommand.WsInfo.WorkspaceID;
-	Request.OpenAPISrcHandlersv2WorkspaceResetRequest.DeleteAdded = true;
+	auto ErrorResponse = RepositoryWorkspaceManipulationApi::Fsrc_handlersv2_workspace_resetDelegate::Bind([&]() {
+		return false;
+	});
+	auto VariantResponse = RepositoryWorkspaceManipulationApi::Fsrc_handlersv2_workspace_resetDelegate::Bind([&](const TVariant<TSharedPtr<ResetStatus>, TSharedPtr<Diversion::CoreAPI::Model::Error>>& Variant) {
+		if (Variant.IsType<TSharedPtr<Diversion::CoreAPI::Model::Error>>()) {
+			auto Value = Variant.Get<TSharedPtr<Diversion::CoreAPI::Model::Error>>();
+			OutErrorMessages.Add(FString::Printf(TEXT("Received error for reset call: %s"), *Value->mDetail));
+			return false;
+		}
+
+		if (!Variant.IsType<TSharedPtr<ResetStatus>>()) {
+			// Unexpected response type
+			OutErrorMessages.Add("Unexpected response type");
+			return false;
+		}
+
+		// TODO: compare response to the expected response?
+		// TODO: print the paths that were reset
+		OutInfoMessages.Add("Successfully reset path(s)");
+		return true;
+	});
+
+	TSharedPtr<Src_handlersv2_workspace_reset_request> Request = MakeShared<Src_handlersv2_workspace_reset_request>();
+	Request->mDelete_added = true;
 
 	TArray<FString> RelativeFilesPaths;
 	Algo::Transform(InCommand.Files, RelativeFilesPaths, [&InCommand](const FString& Path) {
 		return ConvertFullPathToRelative(Path, InCommand.WsInfo.GetPath());
 	});
+	Request->mPaths = RelativeFilesPaths;
 
-	Request.OpenAPISrcHandlersv2WorkspaceResetRequest.Paths = RelativeFilesPaths;
 
-	auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncReset>();
-	bool Success = ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand.Worker, OutInfoMessages, OutErrorMessages);
-
-	return Success;
+	return FDiversionModule::Get().RepositoryWorkspaceManipulationAPIRequestManager->SrcHandlersv2WorkspaceReset(InCommand.WsInfo.RepoID, InCommand.WsInfo.WorkspaceID,
+		Request, FDiversionModule::Get().GetAccessToken(InCommand.WsInfo.AccountID), {}, 5, 120).HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
 }

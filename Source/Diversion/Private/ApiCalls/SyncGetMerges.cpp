@@ -1,150 +1,116 @@
 // Copyright 2024 Diversion Company, Inc. All Rights Reserved.
 
-#include "IPAddressAsyncResolve.h"
-#include "ISourceControlModule.h"
+
+#include "DiversionUtils.h"
 #include "DiversionCommand.h"
-#include "IDiversionStatusWorker.h"
+#include "DiversionModule.h"
 
-#include "OpenAPIRepositoryMergeManipulationApi.h"
-#include "OpenAPIRepositoryMergeManipulationApiOperations.h"
 
-#include "SyncApiCall.h"
+using namespace Diversion::CoreAPI;
 
-using namespace CoreAPI;
 
-using FConflictData = FDiversionResolveInfo;
+bool DiversionUtils::RunGetMerges(const FDiversionCommand& InCommand,
+	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, TArray<Diversion::CoreAPI::Model::Merge>& OutMerges) {
 
-#pragma region GetMerges
-
-using FMerges = OpenAPIRepositoryMergeManipulationApi;
-
-class FSyncGetMerges;
-using FMergeListSyncAPI = TSyncApiCall<
-	FSyncGetMerges,
-	FMerges::SrcHandlersv2MergeListOpenMergesRequest,
-	FMerges::SrcHandlersv2MergeListOpenMergesResponse,
-	FMerges::FSrcHandlersv2MergeListOpenMergesDelegate,
-	FMerges,
-	&FMerges::SrcHandlersv2MergeListOpenMerges,
-	AuthorizedCall,
-	// Output parameters
-	FDiversionWorkerRef, /*Worker*/
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>& /*InfoMessages*/
-	>;
-
-class FSyncGetMerges final : public FMergeListSyncAPI {
-	friend FMergeListSyncAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(FDiversionWorkerRef InOutWorker,
-		TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FMerges::SrcHandlersv2MergeListOpenMergesResponse& Response);
-};
-REGISTER_PARSE_TYPE(FSyncGetMerges);
-
-bool FSyncGetMerges::ResponseImplementation(FDiversionWorkerRef InOutWorker,
-	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FMerges::SrcHandlersv2MergeListOpenMergesResponse& Response) {
-	if (!Response.IsSuccessful()) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
+	auto ErrorResponse = RepositoryMergeManipulationApi::Fsrc_handlersv2_merge_listOpenMergesDelegate::Bind([&](){
 		return false;
-	}
+	});
 
-	IDiversionStatusWorker& Worker = static_cast<IDiversionStatusWorker&>(InOutWorker.Get());
-	Worker.Merges = Response.Content.Items;
+	auto VariantResponse = RepositoryMergeManipulationApi::Fsrc_handlersv2_merge_listOpenMergesDelegate::Bind(
+		[&](const TVariant<TSharedPtr<Src_handlersv2_merge_list_open_merges_200_response>>& Variant) {
+			if (!Variant.IsType<TSharedPtr<Src_handlersv2_merge_list_open_merges_200_response>>()) {
+				// Unexpected response type
+				OutErrorMessages.Add("Unexpected response type");
+				return false;
+			}
+			auto Value = Variant.Get<TSharedPtr<Src_handlersv2_merge_list_open_merges_200_response>>();
+
+			OutMerges.Append(Value->mItems);
+			return true;
+		}
+	);
+
+	return FDiversionModule::Get().RepositoryMergeManipulationAPIRequestManager->SrcHandlersv2MergeListOpenMerges(InCommand.WsInfo.RepoID,
+		TOptional<FString>(), TOptional<FString>(), FDiversionModule::Get().GetAccessToken(InCommand.WsInfo.AccountID), {}, 5, 120).HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages);
+}
+
+
+bool DiversionUtils::GetConflictedFiles(const FDiversionCommand& InCommand,  TArray<FString>& OutInfoMessages,
+	TArray<FString>& OutErrorMessages, TMap<FString, FDiversionResolveInfo>& OutConflicts,
+	TArray<Diversion::CoreAPI::Model::Merge>& OutWorkspaceMergesList, TArray<Diversion::CoreAPI::Model::Merge>& OutBranchMergesList) {
 	
-	return true;
-}
-
-#pragma endregion
-
-#pragma region GetSpecificMerge
-class FSyncGetConflictedFiles;
-using FGetSpecificMergeSyncAPI = TSyncApiCall<
-	FSyncGetConflictedFiles,
-	FMerges::SrcHandlersv2MergeGetOpenMergeRequest,
-	FMerges::SrcHandlersv2MergeGetOpenMergeResponse,
-	FMerges::FSrcHandlersv2MergeGetOpenMergeDelegate,
-	FMerges,
-	&FMerges::SrcHandlersv2MergeGetOpenMerge,
-	AuthorizedCall,
-	// 	ResponseImplementation arguments types
-	const FDiversionCommand&, /*InCommand*/
-	TArray<FString>&, /*ErrorMessages*/
-	TArray<FString>& /*InfoMessages*/
->;
-
-
-class FSyncGetConflictedFiles final : public FGetSpecificMergeSyncAPI {
-	friend FGetSpecificMergeSyncAPI; 	// To support Static Polymorphism and keep encapsulation
-
-	static bool ResponseImplementation(const FDiversionCommand& InCommand,
-		TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FMerges::SrcHandlersv2MergeGetOpenMergeResponse& Response);
-};
-REGISTER_PARSE_TYPE(FSyncGetConflictedFiles);
-
-bool FSyncGetConflictedFiles::ResponseImplementation(const FDiversionCommand& InCommand,
-	TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages, const FMerges::SrcHandlersv2MergeGetOpenMergeResponse& Response) {
-	if (!Response.IsSuccessful()) {
-		FString BaseErr = FString::Printf(TEXT("%d:%s"), Response.GetHttpResponseCode(), *Response.GetResponseString());
-		AddErrorMessage(BaseErr, OutErrorMessages);
+	// Get the list of open merges for current branch
+	TArray<Diversion::CoreAPI::Model::Merge> AllRepoMerges;
+	if (!RunGetMerges(InCommand, OutInfoMessages, OutErrorMessages, AllRepoMerges)) {
 		return false;
 	}
 
-	IDiversionStatusWorker& Worker = static_cast<IDiversionStatusWorker&>(InCommand.Worker.Get());
-
-	FConflictData ConflictInfo;
-	for (const auto& Conflict: Response.Content.Conflicts) {
-		ConflictInfo.BaseFile = DiversionUtils::ConvertRelativePathToDiversionFull(Conflict.Base.Path, InCommand.WsInfo.GetPath());
-		ConflictInfo.BaseRevision = Worker.Merges[0].AncestorCommit;
-		ConflictInfo.RemoteRevision = Worker.Merges[0].OtherRef;
-		ConflictInfo.RemoteFile = DiversionUtils::ConvertRelativePathToDiversionFull(Conflict.Other.Path, InCommand.WsInfo.GetPath());
-		ConflictInfo.MergeId = Worker.Merges[0].Id;
-		ConflictInfo.ConflictId = Conflict.ConflictId;
-		Worker.Conflicts.Add(ConflictInfo.BaseFile, ConflictInfo);
-		
-	}
-
-	OutInfoMessages.Add(FString::Printf(TEXT("Found %d conflicted files"), Worker.Conflicts.Num()));
-	return true;
-}
-
-#pragma endregion 
-
-bool DiversionUtils::RunGetMerges(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages) {
-	auto Request = FMerges::SrcHandlersv2MergeListOpenMergesRequest();
-	Request.RepoId = InCommand.WsInfo.RepoID;
-
-	auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncGetMerges>();
-	return ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand.Worker, OutInfoMessages, OutErrorMessages);
-}
-
-
-bool DiversionUtils::GetConflictedFiles(const FDiversionCommand& InCommand, TArray<FString>& OutInfoMessages, TArray<FString>& OutErrorMessages) {
-	
-	// Get the list of open merges first
-	if (!RunGetMerges(InCommand, OutInfoMessages, OutErrorMessages)) {
-		return false;
-	}
-
-	IDiversionStatusWorker& Worker = static_cast<IDiversionStatusWorker&>(InCommand.Worker.Get());
-
-	// We should take only the first returned merge.
-	// It doesn't make sense to handle more than one merge at the same time
-	if (Worker.Merges.Num() > 0)
+	TArray<Diversion::CoreAPI::Model::Merge> Merges;
+	for (auto& Merge : AllRepoMerges)
 	{
-		const auto& Merge = Worker.Merges[0];
-		auto Request = FMerges::SrcHandlersv2MergeGetOpenMergeRequest();
-		Request.MergeId = Merge.Id;
-		Request.RepoId = InCommand.WsInfo.RepoID;
+		//Filter out the merges based on either the workspace or branch(both for source and for target)
+		if(Merge.mBase_ref == InCommand.WsInfo.BranchID ||
+			Merge.mOther_ref == InCommand.WsInfo.BranchID)
+		{
+			Merges.Add(Merge);
+			OutBranchMergesList.Add(Merge);
+		}
+		else if (Merge.mBase_ref == InCommand.WsInfo.WorkspaceID ||
+			Merge.mOther_ref == InCommand.WsInfo.WorkspaceID)
+		{
+			Merges.Add(Merge);
+			OutWorkspaceMergesList.Add(Merge);
+		}
+	}
+	
+	// Not supporting multiple merges yet. Open task at [DIV-6323] 
+	// This requires extending the current existing merge UI to show multiple merges
+	if (Merges.Num() > 0)
+	{
+		const auto& Merge = Merges[0];
 
-		auto& ApiCall = FDiversionModule::Get().GetApiCall<FSyncGetConflictedFiles>();
-		if (!ApiCall.CallAPI(Request, InCommand.WsInfo.AccountID, InCommand, OutInfoMessages, OutErrorMessages)) {
-			OutErrorMessages.Add(FString::Printf(TEXT("Failed to get conflicted files for merge %s"), *Merge.Id));
+		auto ErrorResponse = RepositoryMergeManipulationApi::Fsrc_handlersv2_merge_getOpenMergeDelegate::Bind(
+			[&]() {
+				return false;
+			}
+		);
+		auto VariantResponse = RepositoryMergeManipulationApi::Fsrc_handlersv2_merge_getOpenMergeDelegate::Bind(
+			[&](const TVariant<TSharedPtr<DetailedMerge>, TSharedPtr<Diversion::CoreAPI::Error>>& Variant) {
+				
+				if (!Variant.IsType<TSharedPtr<DetailedMerge>>()) {
+					// Unexpected response type
+					OutErrorMessages.Add("Unexpected response type");
+					return false;
+				}
+				auto Value = Variant.Get<TSharedPtr<DetailedMerge>>();
+				
+				
+				FDiversionResolveInfo ConflictInfo;
+				for (const auto& Conflict : Value->mConflicts) {
+					ConflictInfo.BaseFile = DiversionUtils::ConvertRelativePathToDiversionFull(Conflict.mBase.mPath, InCommand.WsInfo.GetPath());
+					ConflictInfo.BaseRevision = Merge.mAncestor_commit;
+					ConflictInfo.RemoteRevision = Merge.mOther_ref;
+					ConflictInfo.RemoteFile = DiversionUtils::ConvertRelativePathToDiversionFull(Conflict.mOther.mPath, InCommand.WsInfo.GetPath());
+					ConflictInfo.MergeId = Merge.mId;
+					ConflictInfo.ConflictId = Conflict.mConflict_id;
+					if (Conflict.mResolved_side.IsSet())
+					{
+						ConflictInfo.ResolutionSide = Conflict.mResolved_side.GetValue();
+					}
+					OutConflicts.Add(ConflictInfo.BaseFile, ConflictInfo);
+				}
+
+				OutInfoMessages.Add(FString::Printf(TEXT("Found %d conflicted files"), OutConflicts.Num()));
+				return true;
+			}
+		);
+
+		if (!FDiversionModule::Get().RepositoryMergeManipulationAPIRequestManager->SrcHandlersv2MergeGetOpenMerge(
+			InCommand.WsInfo.RepoID, Merge.mId, FDiversionModule::Get().GetAccessToken(InCommand.WsInfo.AccountID), {}, 5, 120).
+			HandleApiResponse(ErrorResponse, VariantResponse, OutErrorMessages)) {
+			OutErrorMessages.Add(FString::Printf(TEXT("Failed to get conflicted files for merge %s"), *Merge.mId));
 			return false;
 		}
-
-		// Update the state of the ongoing merge
-		Worker.OutOnGoingMerge = Worker.Conflicts.Num() > 0;
 	}
 	return true;
 }

@@ -34,7 +34,113 @@ FText FGetWsInfo::ProgressString = FText::GetEmpty();
 
 #pragma region Diversion API Workers
 
+//
+
+FName FDiversionCheckForRepoWithSameNameWorker::GetName() const {
+	return "CheckForRepoWithSameName";
+}
+
+bool FDiversionCheckForRepoWithSameNameWorker::Execute(FDiversionCommand& InCommand) {
+	if (!ExecuteValidityCheck(InCommand, GetName())) { return false; }
+
+	bool Success = true;
+	bool OwnedOnly = true;
+	
+	auto Operation = StaticCastSharedRef<FCheckForRepoWithSameName>(InCommand.Operation);
+	auto DesiredRepoName = Operation->GetRepoName();
+	TArray<FString> RemoteRepositories;
+	Success &= DiversionUtils::GetRemoteRepos(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, OwnedOnly, RemoteRepositories);
+
+	bRepoWithSameNameExists = RemoteRepositories.Contains(DesiredRepoName);
+
+	InCommand.MarkOperationCompleted(Success);
+	return Success;
+}
+
+bool FDiversionCheckForRepoWithSameNameWorker::UpdateStates() const {
+	auto& Provider = FDiversionModule::Get().GetProvider();
+	Provider.SetRepoWithSameNameExists(bRepoWithSameNameExists);
+	return true;
+}
+
+//
+
+FName FDiversionCheckIfWorkspaceExistsInPathWorker::GetName() const {
+	return "CheckIfWorkspaceExistsInPath";
+}
+
+bool FDiversionCheckIfWorkspaceExistsInPathWorker::Execute(FDiversionCommand& InCommand) {
+	if (!ExecuteValidityCheck(InCommand, GetName())) { return false; }
+
+	bool Success = true;
+	bool OwnedOnly = true;
+	TArray<WorkspaceInfo> LocalWorkspaces;
+	auto Operation = StaticCastSharedRef<FCheckIfWorkspaceExistsInPath>(InCommand.Operation);
+	
+	auto RepoPath = Operation->GetPath();
+	if(RepoPath.EndsWith("/")) {
+		RepoPath = RepoPath.LeftChop(1);
+	}
+
+	auto DesiredRepoName = Operation->GetRepoName();
+
+	TArray<FString> RemoteRepositories;
+	Success &= DiversionUtils::GetRemoteRepos(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, OwnedOnly, RemoteRepositories);
+	bRepoWithSameNameExists = RemoteRepositories.Contains(DesiredRepoName);
+
+	Success &= DiversionUtils::GetAllLocalWorkspaces(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, LocalWorkspaces);
+
+
+	LocalWorkspaces = LocalWorkspaces.FilterByPredicate([&RemoteRepositories](const WorkspaceInfo& WsInfo) {
+		return RemoteRepositories.Contains(WsInfo.RepoName);
+	});
+
+	// We're looking for a nested repo, so we need to find the one that contains the root path
+	bWorkspaceExistsInPath = LocalWorkspaces.ContainsByPredicate([&RepoPath](const WorkspaceInfo& WsInfo) {
+		return RepoPath.StartsWith(WsInfo.GetPath());
+	});
+
+	InCommand.MarkOperationCompleted(Success);
+	return Success;
+}
+
+bool FDiversionCheckIfWorkspaceExistsInPathWorker::UpdateStates() const {
+	auto& Provider = FDiversionModule::Get().GetProvider();
+	Provider.SetWorkspaceExistsInPath(bWorkspaceExistsInPath);
+	// We already fetch this info so lets set it as well - this saves cached called to the BE
+	Provider.SetRepoWithSameNameExists(bRepoWithSameNameExists);
+	return true;
+}
+
 // 
+
+FName FDiversionUpdateWorkspaceWorker::GetName() const
+{
+	return "UpdateWorkspace";
+}
+
+bool FDiversionUpdateWorkspaceWorker::Execute(class FDiversionCommand& InCommand)
+{
+	if(!ExecuteValidityCheck(InCommand, GetName())) { return false;}
+
+	bool Success = true;
+	UE_LOG(LogSourceControl, Display, TEXT("Diversion: Updating workspace"));
+	Success &= DiversionUtils::UpdateWorkspace(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages); 
+
+	InCommand.MarkOperationCompleted(Success);
+	return Success;
+}
+
+bool FDiversionUpdateWorkspaceWorker::UpdateStates() const
+{
+	auto& Provider = FDiversionModule::Get().GetProvider();
+	// Call get conflicted synchronously files to update the conflicted files
+	auto operation = ISourceControlOperation::Create<FGetConflictedFiles>();
+	Provider.Execute(operation, nullptr, { }, EConcurrency::Synchronous);
+	// Reset the conflicted files timer
+	Provider.BackgroundConflictedFilesSkipToNextInterval();
+	return true;
+}
 
 FName FDiversionInitRepoWorker::GetName() const
 {
@@ -79,12 +185,12 @@ bool FDiversionAnalyticsEventWorker::Execute(FDiversionCommand& InCommand)
 
 //
 
-FName FDiversionGetPotentialConflicts::GetName() const
+FName FDiversionGetPotentialClashes::GetName() const
 {
-	return "GetPotentialConflicts";
+	return "GetPotentialClashes";
 }
 
-bool FDiversionGetPotentialConflicts::Execute(class FDiversionCommand& InCommand)
+bool FDiversionGetPotentialClashes::Execute(class FDiversionCommand& InCommand)
 {
 	if(!ExecuteValidityCheck(InCommand, GetName())) { return false;}
 	
@@ -98,17 +204,17 @@ bool FDiversionGetPotentialConflicts::Execute(class FDiversionCommand& InCommand
 	return Success;
 }
 
-bool FDiversionGetPotentialConflicts::UpdateStates() const
+bool FDiversionGetPotentialClashes::UpdateStates() const
 {
 	bool bUpdated = IDiversionWorker::UpdateStates();
 	auto& Provider = FDiversionModule::Get().GetProvider();
 	bool FullRepoUpdateRequested = IsFullRepoStatusQuery(Provider.GetWsInfo().GetPath());
-	bUpdated &= FDiversionModule::Get().GetProvider().UpdatePotentialConflictStates(PotentialClashes,
+	bUpdated &= Provider.UpdatePotentialClashedStates(PotentialClashes,
 		FullRepoUpdateRequested);
 	return bUpdated;
 }
 
-bool FDiversionGetPotentialConflicts::IsFullRepoStatusQuery(const FString& RepoPath) const
+bool FDiversionGetPotentialClashes::IsFullRepoStatusQuery(const FString& RepoPath) const
 {
 	// Search for the repo path in the queried files, if found and the query
 	// is recursive - it means we have a repo-wide status info to update
@@ -132,7 +238,8 @@ bool FDiversionAgentHealthCheckWorker::Execute(FDiversionCommand& InCommand)
 	Success &= DiversionUtils::RunAgentHealthCheck(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages);
 	if(Success && InCommand.IsAgentAlive)
 	{
-		Success &= DiversionUtils::AgentInSync(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages);
+		if(InCommand.WsInfo.IsValid())
+			Success &= DiversionUtils::AgentInSync(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages);
 	}
 
 	InCommand.MarkOperationCompleted(Success);
@@ -162,9 +269,16 @@ bool FDiversionWsInfoWorker::Execute(FDiversionCommand& InCommand)
 	if(!ExecuteValidityCheck(InCommand, GetName())) { return false;}
 
 	bool Success = true;
-
 	FString RootPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-	Success &= DiversionUtils::GetWorkspaceConfigByPath(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, RootPath);
+	
+	TArray<WorkspaceInfo> LocalWorkspaces;
+	Success &= DiversionUtils::GetAllLocalWorkspaces(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, LocalWorkspaces);
+	
+	// We're looking for a nested repo, so we need to find the one that contains the root path
+	auto WsInfoPtr = LocalWorkspaces.FindByPredicate([&RootPath](const WorkspaceInfo& WsInfoArg) {
+		return RootPath.StartsWith(WsInfoArg.GetPath());
+	});
+	WsInfo = WsInfoPtr ? *WsInfoPtr : WorkspaceInfo();
 
 	InCommand.MarkOperationCompleted(Success);
 	return Success;
@@ -198,7 +312,7 @@ bool FDiversionResolveFileWorker::Execute(FDiversionCommand& InCommand) {
 
 bool FDiversionResolveFileWorker::UpdateStates() const {
 	auto& Provider = FDiversionModule::Get().GetProvider();
-	Provider.ConflictedFiles.Remove(FileEntry.Path);
+	Provider.RemoveConflictedState(FileEntry.mPath);
 	return IDiversionWorker::UpdateStates();
 }
 
@@ -217,6 +331,9 @@ bool FDiversionFinalizeMergeWorker::Execute(FDiversionCommand& InCommand)
 
 	TSharedRef<FFinalizeMerge, ESPMode::ThreadSafe> Operation = StaticCastSharedRef<FFinalizeMerge>(InCommand.Operation);
 	Success &= DiversionUtils::RunFinalizeMerge(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, Operation->GetMergeID());
+	if (Success) {
+		Success &= DiversionUtils::NotifyAgentSyncRequired(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages);
+	}
 
 	InCommand.MarkOperationCompleted(Success);
 	return Success;
@@ -225,6 +342,36 @@ bool FDiversionFinalizeMergeWorker::Execute(FDiversionCommand& InCommand)
 #pragma endregion
 
 #pragma region Source Control Workers
+
+FName FDiversionGetConflictedFiles::GetName() const
+{
+	return "GetConflictedFiles";
+}
+
+bool FDiversionGetConflictedFiles::Execute(class FDiversionCommand& InCommand)
+{
+	if(!ExecuteValidityCheck(InCommand, GetName())) { return false;}
+	
+	bool Success = DiversionUtils::GetConflictedFiles(InCommand, InCommand.InfoMessages,
+	                                                  InCommand.ErrorMessages, ConflictedFilesData,
+	                                                  WorkspaceMergesList, BranchMergesList);
+	bRequireUpdate = Success;
+	InCommand.MarkOperationCompleted(Success);
+	return Success;
+}
+
+bool FDiversionGetConflictedFiles::UpdateStates() const
+{
+	if(!bRequireUpdate)
+	{
+		return false;
+	}
+
+	auto& Provider = FDiversionModule::Get().GetProvider();
+	Provider.SetWorkspaceMergesList(WorkspaceMergesList);
+	Provider.SetBranchMergesList(BranchMergesList);
+	return Provider.UpdateConflictedStates(ConflictedFilesData);
+}
 
 FName FDiversionConnectWorker::GetName() const
 {
@@ -303,6 +450,7 @@ bool FDiversionCheckInWorker::Execute(FDiversionCommand& InCommand)
 		// TODO: print more elaborate success message using the info messages of the command
 		Operation->SetSuccessMessage(ParseCommitResults(InCommand.InfoMessages));
 		CommittedFilesPaths = InCommand.Files;
+		Success &= DiversionUtils::NotifyAgentSyncRequired(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages);
 	}
 	
 	InCommand.MarkOperationCompleted(Success);
@@ -413,52 +561,11 @@ bool FDiversionRevertWorker::UpdateStates() const
 
 	// This is only fine since it's a synchronous blocking call!
 	bool bIsFullUpdateStatus = false;
-	bUpdated &= Provider.UpdateCachedStates(States, bIsFullUpdateStatus, Conflicts);
-	bUpdated &= Provider.UpdatePotentialConflictStates(PotentialClashes, bIsFullUpdateStatus);
+	bUpdated &= Provider.UpdateCachedStates(States, bIsFullUpdateStatus);
+	bUpdated &= Provider.UpdatePotentialClashedStates(PotentialClashes, bIsFullUpdateStatus);
 
 	return bUpdated;
 }
-
-// bool FDiversionRevertWorker::UpdateStates() const
-// {
-// 	if (!bShouldUpdateStates) {
-// 		// Don't update states if we got an error from BE
-// 		// No need to log, the error is in the API call
-// 		return false;
-// 	}
-//
-// 	bool bUpdated = IDiversionWorker::UpdateStates();
-//
-// 	FDiversionProvider& Provider = FDiversionModule::Get().GetProvider();
-//
-// 	// This is only fine since it's a synchronous blocking call!
-// 	bUpdated &= Provider.UpdateCachedStates(States);
-// 	if (OutOnGoingMerge) {
-// 		Provider.OnGoingMerge = true;
-// 		Provider.ConflictedFiles = Conflicts;
-// 	}
-//
-// 	return bUpdated;
-// }
-
-//
-
-// FName FDiversionSyncWorker::GetName() const
-// {
-//    return "Sync";
-// }
-//
-// bool FDiversionSyncWorker::Execute(FDiversionCommand& InCommand)
-// {
-// 	if (!DiversionUtils::DiversionValidityCheck(InCommand.Operation->GetName() == GetName(),
-// 		InCommand.Operation->GetName().ToString() + " != " + GetName().ToString(), InCommand.WsInfo.AccountID)) {
-// 		InCommand.MarkOperationCompleted(false);
-// 		return false;
-// 	}
-//
-// 	InCommand.MarkOperationCompleted(InCommand.bCommandSuccessful);
-// 	return InCommand.bCommandSuccessful;
-// }
 
 //
 
@@ -517,24 +624,26 @@ bool FDiversionUpdateStatusWorker::Execute(FDiversionCommand& InCommand)
 }
 
 
-void FDiversionUpdateStatusWorker::MarkSynchingFiles() const
+void FDiversionUpdateStatusWorker::MarkSyncingFiles() const
 {
 	auto& Provider = FDiversionModule::Get().GetProvider();
 	// Mark the files as being synced to give the user immediate feedback
 	for(auto& Path : QueriedPaths)
 	{
 		const TSharedRef<FDiversionState> State = Provider.GetStateInternal(Path);
-		if (State->WorkingCopyState != EWorkingCopyState::Unknown)
+		if (State->WorkingCopyState != EWorkingCopyState::Unknown &&
+			// Avoid tagging conflicted files as syncing since it prevents calling resolve
+			!State->IsConflicted())
 		{
 			State->IsSyncing = true;
-			Provider.AddSynchingState(Path, State);
+			Provider.AddSyncingState(Path, State);
 		}
 	}
 }
 
 bool FDiversionUpdateStatusWorker::IsFullRepoStatusQuery(const FString& RepoPath) const
 {
-	// Seacrh for the repo path in the queried files, if found and the query
+	// Search for the repo path in the queried files, if found and the query
 	// is recursive - it means we have a repo-wide status info to update
 	return QueriedPaths.Contains(RepoPath) && bRecursiveRequest;
 }
@@ -551,6 +660,9 @@ bool FDiversionUpdateStatusWorker::UpdateStates() const
 		State->History = History.Value;
 	}
 	
+	// If we ran get history, we should update the conflicted files as we fetched them implicitly
+	UpdateConflicts();
+	
 	bool FullRepoUpdateRequested = IsFullRepoStatusQuery(Provider.GetWsInfo().GetPath());
 
 	// This is a sync call - return here and trigger a BG status call
@@ -558,7 +670,7 @@ bool FDiversionUpdateStatusWorker::UpdateStates() const
 	{
 		if(!FullRepoUpdateRequested)
 		{
-			MarkSynchingFiles();
+			MarkSyncingFiles();
 		}
 		// Force a reload of the status to get the latest changes
 		Provider.BackgroundStatusTriggerInstantCall();
@@ -570,14 +682,14 @@ bool FDiversionUpdateStatusWorker::UpdateStates() const
 		// Handle synching status - mark the queried files as being synced
 		if(!FullRepoUpdateRequested)
 		{
-			MarkSynchingFiles();
+			MarkSyncingFiles();
 		}
 	}
 
 	// Async status call
 	if(bShouldUpdateStates)
 	{
-		Provider.UpdateCachedStates(States, FullRepoUpdateRequested, Conflicts);
+		Provider.UpdateCachedStates(States, FullRepoUpdateRequested);
 	}
 	else
 	{
@@ -592,20 +704,42 @@ bool FDiversionUpdateStatusWorker::UpdateHistory(FDiversionCommand& InCommand)
 	// When fetching history, we need to have the updated states data. so running update status first
 	bool Success = DiversionUtils::RunUpdateStatus(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages);
 
+	bShouldUpdateConflicts = DiversionUtils::GetConflictedFiles(InCommand, InCommand.InfoMessages,
+		InCommand.ErrorMessages, ConflictedFilesData,
+		WorkspaceMergesList, BranchMergesList);
+	bShouldUpdateConflicts &= (ConflictedFilesData.Num() > 0);
+
 	// TODO: optimize this like plastic implementation
-	for(auto& State : States)
+	for (auto& State : States)
 	{
 		// Get the history of the file in the current branch
 		Success &= DiversionUtils::RunGetHistory(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, State.Key, nullptr);
-		if (State.Value.IsConflicted())
+	}
+
+	if (bShouldUpdateConflicts) {
+		// Fetch conflict "remote revision" data
+		for (auto& [FilePath, ConflictData] : ConflictedFilesData)
 		{
 			// Get the revision data for the conflicted with file on the other branch
-			DiversionUtils::RunGetHistory(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages, 
-				State.Key, &State.Value.PendingResolveInfo.RemoteRevision);
+			DiversionUtils::RunGetHistory(InCommand, InCommand.InfoMessages, InCommand.ErrorMessages,
+				FilePath, &ConflictData.RemoteRevision);
 		}
 	}
 
 	return Success;
+}
+
+bool FDiversionUpdateStatusWorker::UpdateConflicts() const
+{
+	if (!bShouldUpdateConflicts) {
+		// It's not a failure, just no conflicts to update
+		return true;
+	}
+
+	auto& Provider = FDiversionModule::Get().GetProvider();
+	Provider.SetWorkspaceMergesList(WorkspaceMergesList);
+	Provider.SetBranchMergesList(BranchMergesList);
+	return Provider.UpdateConflictedStates(ConflictedFilesData);
 }
 
 //
@@ -654,9 +788,7 @@ bool FDiversionResolveWorker::Execute(class FDiversionCommand& InCommand)
 	for (const auto& File : InCommand.Files)
 	{
 		const auto FileName = DiversionUtils::ConvertRelativePathToDiversionFull(File, InCommand.WsInfo.GetPath());
-		if (FDiversionResolveInfo* ResolveInfo = InCommand.ConflictedFiles.Find(FileName)) {
-			FilesToResolve.Add(FileName, *ResolveInfo);
-		}
+		FilesToResolve.Add(FileName);
 	}
 
 	InCommand.MarkOperationCompleted(InCommand.bCommandSuccessful);
@@ -666,14 +798,100 @@ bool FDiversionResolveWorker::Execute(class FDiversionCommand& InCommand)
 bool FDiversionResolveWorker::UpdateStates() const
 {
 	auto& Provider = FDiversionModule::Get().GetProvider();
-	Provider.FilesToResolve = FilesToResolve;
+
+	TMap<FString, FDiversionResolveInfo> ResolveFilesWithInfo;
+	for(const auto& File: FilesToResolve)
+	{
+		if(auto ConflictedData = Provider.GetFileResolveInfo(File))
+		{
+			ResolveFilesWithInfo.Add(File, *ConflictedData);
+		}
+		else
+		{
+			UE_LOG(LogSourceControl, Warning, TEXT("Diversion: Trying to resolve a file %s which isn't in the conflicted files list"), *File);
+		}
+	}
+	
+	Provider.SetFilesToResolve(ResolveFilesWithInfo);
 	// Remove the resolved files from the provider conflicted files
 	for(const auto& File : FilesToResolve)
 	{
-		Provider.ConflictedFiles.Remove(File.Key);
+		Provider.RemoveConflictedState(File);
 	}
 
 	return IDiversionWorker::UpdateStates();
+}
+
+FName FDiversionSyncWorker::GetName() const
+{
+	return "Sync";
+}
+
+bool FDiversionSyncWorker::Execute(FDiversionCommand& InCommand)
+{
+	if(!ExecuteValidityCheck(InCommand, GetName())) { return false;}
+	// In Diversion files are automatically synced by the agent
+	
+	InCommand.MarkOperationCompleted(InCommand.bCommandSuccessful);
+	return InCommand.bCommandSuccessful;
+}
+
+bool FDiversionSyncWorker::UpdateStates() const
+{
+	return true;
+}
+
+
+FName FDiversionGetPendingChangelistsWorker::GetName() const
+{
+	return "UpdateChangelistsStatus";
+}
+
+bool FDiversionGetPendingChangelistsWorker::Execute(FDiversionCommand& InCommand)
+{
+	if (!ExecuteValidityCheck(InCommand, GetName())) { return false; }
+
+
+	TSharedRef<FUpdatePendingChangelistsStatus> Operation =
+		StaticCastSharedRef<FUpdatePendingChangelistsStatus>(InCommand.Operation);
+	InCommand.bCommandSuccessful = true;
+
+	InCommand.MarkOperationCompleted(InCommand.bCommandSuccessful);
+	return InCommand.bCommandSuccessful;
+}
+
+bool FDiversionGetPendingChangelistsWorker::UpdateStates() const
+{
+	bool bUpdated = false;
+	const FDateTime Now = FDateTime::Now();
+
+	auto& Provider = FDiversionModule::Get().GetProvider();
+	Provider.AddCurrentChangesToChangelistState();
+	bUpdated = true;
+	return bUpdated;
+}
+
+
+// IDiversionWorker interface
+FName FDiversionOperationNotSupportedWorker::GetName() const {
+	return FName();
+}
+
+bool FDiversionOperationNotSupportedWorker::Execute(FDiversionCommand& InCommand)
+{
+	// Put a notification that the operation is not supported by Diversion
+	const FName OperationName = InCommand.Operation->GetName();
+	const FText OperationUnsupported = FText::Format(
+		FText::FromString("Operation: {0} is inapplicable for Diversion"), FText::FromName(OperationName));
+	InCommand.InfoMessages.Add(OperationUnsupported.ToString());
+	InCommand.PopupNotification = MakeUnique<FDiversionNotification>(OperationUnsupported, TArray<FNotificationButtonInfo>(), SNotificationItem::CS_Pending);
+
+	InCommand.MarkOperationCompleted(false);
+	return InCommand.bCommandSuccessful;
+}
+
+bool FDiversionOperationNotSupportedWorker::UpdateStates() const {
+	return true;
 }
 
 #pragma endregion

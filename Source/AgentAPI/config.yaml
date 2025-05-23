@@ -1,5 +1,0 @@
-generatorName: cpp-ue4
-cppNamespace: AgentAPI
-unrealModuleName: AgentAPI
-streamHttpFileInput: true
-loadUrl: "FDiversionAgentAddress::GetAgentURL()"

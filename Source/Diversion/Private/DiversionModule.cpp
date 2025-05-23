@@ -8,10 +8,8 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/App.h"
 #include "Modules/ModuleManager.h"
-#include "ContentBrowserModule.h"
 #include "RevisionControlStyle/RevisionControlStyle.h"
 
-#include "CustomWidgets/DiversionPotentialClashUI.h"
 #include "CustomWidgets/ConfirmationDialog.h"
 
 #include "AssetToolsModule.h"
@@ -33,6 +31,21 @@ void FDiversionModule::StartupModule()
 {
 	ServiceStatusLock =  MakeUnique<FRWLock>();
 
+	// Create the Agent API request manager
+	auto AgentAPIClient = MakeShared<DiversionHttp::FHttpRequestManager>(AGENT_API_HOST, AGENT_API_PORT,
+		DiversionUtils::GetDiversionHeaders(), false);
+	AgentAPIRequestManager = MakeUnique<Diversion::AgentAPI::DefaultApi>(AgentAPIClient);
+
+	CoreAPIClient = MakeShared<DiversionHttp::FHttpRequestManager>(DIVERSION_API_HOST, DIVERSION_API_PORT,
+	                                                           DiversionUtils::GetDiversionHeaders());
+	SupportAPIRequestManager = MakeUnique<Diversion::CoreAPI::SupportApi>(CoreAPIClient);
+	AnalyticsAPIRequestManager = MakeUnique<Diversion::CoreAPI::AnalyticsApi>(CoreAPIClient);
+	RepositoryManagementAPIRequestManager = MakeUnique<Diversion::CoreAPI::RepositoryManagementApi>(CoreAPIClient);
+	RepositoryManipulationAPIRequestManager = MakeUnique<Diversion::CoreAPI::RepositoryManipulationApi>(CoreAPIClient);
+	RepositoryMergeManipulationAPIRequestManager = MakeUnique<Diversion::CoreAPI::RepositoryMergeManipulationApi>(CoreAPIClient);
+	RepositoryCommitManipulationAPIRequestManager = MakeUnique<Diversion::CoreAPI::RepositoryCommitManipulationApi>(CoreAPIClient);
+	RepositoryWorkspaceManipulationAPIRequestManager = MakeUnique<Diversion::CoreAPI::RepositoryWorkspaceManipulationApi>(CoreAPIClient);
+
 	// Register our operations
 	// Note: this provider does not uses the "CheckOut" command, which is a Perforce "lock", as Diversion has no lock command (all tracked files in the working copy are always already checked-out).
 	DiversionProvider.RegisterWorker("Connect", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionConnectWorker>));
@@ -43,8 +56,19 @@ void FDiversionModule::StartupModule()
 	DiversionProvider.RegisterWorker("CheckIn", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionCheckInWorker>));
 	DiversionProvider.RegisterWorker("Revert", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionRevertWorker>));
 	DiversionProvider.RegisterWorker("Resolve", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionResolveWorker>));
+	DiversionProvider.RegisterWorker("Sync", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionSyncWorker>));
+	DiversionProvider.RegisterWorker("UpdateChangelistsStatus", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionGetPendingChangelistsWorker>));
+	
+	// Unsupported operations (irrelevant for diversion)
+	DiversionProvider.RegisterWorker("NewChangelist", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
+	DiversionProvider.RegisterWorker("Shelve", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
+	DiversionProvider.RegisterWorker("Unshelve", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
+	DiversionProvider.RegisterWorker("DeleteChangelist", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
+	DiversionProvider.RegisterWorker("EditChangelist", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
+	DiversionProvider.RegisterWorker("RevertUnchanged", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
+	DiversionProvider.RegisterWorker("MoveToChangelist", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
+	DiversionProvider.RegisterWorker("DeleteShelved", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionOperationNotSupportedWorker>));
 
-//	DiversionProvider.RegisterWorker("Sync", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionSyncWorker>));
 
 	// Diversion Operations workers
 	DiversionProvider.RegisterWorker("SendAnalytics", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionAnalyticsEventWorker>));
@@ -53,33 +77,16 @@ void FDiversionModule::StartupModule()
 	DiversionProvider.RegisterWorker("InitRepo", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionInitRepoWorker>));
 	DiversionProvider.RegisterWorker("FinalizeMerge", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionFinalizeMergeWorker>));
 	DiversionProvider.RegisterWorker("ResolveFile", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionResolveFileWorker>));
-	DiversionProvider.RegisterWorker("GetPotentialConflicts", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionGetPotentialConflicts>));
-
+	DiversionProvider.RegisterWorker("UpdateWorkspace", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionUpdateWorkspaceWorker>));
+	DiversionProvider.RegisterWorker("GetPotentialClashes", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionGetPotentialClashes>));
+	DiversionProvider.RegisterWorker("GetConflictedFiles", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionGetConflictedFiles>));
+	DiversionProvider.RegisterWorker("CheckIfWorkspaceExistsInPath", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionCheckIfWorkspaceExistsInPathWorker>));
+	DiversionProvider.RegisterWorker("CheckForRepoWithSameName", FGetDiversionWorker::CreateStatic(&CreateWorker<FDiversionCheckForRepoWithSameNameWorker>));
 	// load our settings
 	DiversionSettings.LoadSettings();
 
 	// Bind our version control provider to the editor
 	IModularFeatures::Get().RegisterModularFeature("SourceControl", &DiversionProvider);
-
-	// Add the Diversion potential clash indicator to the asset view
-	SPotentialClashIndicator::CacheIndicatorBrush();
-	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
-	ContentBrowserModule.AddAssetViewExtraStateGenerator(
-		FAssetViewExtraStateGenerator(
-			FOnGenerateAssetViewExtraStateIndicators::CreateLambda(
-				[](const FAssetData& AssetData)
-				{
-					return SNew(SPotentialClashIndicator).AssetPath(
-						DiversionUtils::GetFilePathFromAssetData(AssetData)
-					);
-				}),
-			FOnGenerateAssetViewExtraStateIndicators::CreateLambda([](const FAssetData& AssetData) {
-				return SNew(SPotentialClashTooltip).AssetPath(
-					DiversionUtils::GetFilePathFromAssetData(AssetData)
-				);
-			})
-		));
-
 	OpenedEditorAssets.Empty();
 
 	if(ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings"))
@@ -219,7 +226,7 @@ bool FDiversionModule::PotentialConflictExistForAsset(UObject* Asset)
 	// Run update status to get the most recent file state from BE
 	FString FilePath = FPaths::ConvertRelativePathToFull(DiversionUtils::GetFilePathFromAssetData(FAssetData(Asset)));
 	auto& Provider = FDiversionModule::Get().GetProvider();
-	Provider.Execute(ISourceControlOperation::Create<FGetPotentialConflicts>(), nullptr,
+	Provider.Execute(ISourceControlOperation::Create<FGetPotentialClashes>(), nullptr,
 		{FilePath},
 		EConcurrency::Synchronous);
 
@@ -296,7 +303,7 @@ void FDiversionModule::ShowPotentialConflictConfirmationDialog(UObject* Asset)
 		LOCTEXT("Feedback_Tooltip","This is an experimental feature. Your feedback is valuable to us! If you are having issues please let us know."),
 		[]()
 		{
-			FPlatformProcess::LaunchURL(TEXT("https://discord.com/invite/wSJgfsMwZr"), nullptr, nullptr);
+			FPlatformProcess::LaunchURL(TEXT("https://www.diversion.dev/plugin-support"), nullptr, nullptr);
 			
 			auto SendAnalyticsOperation = ISourceControlOperation::Create<FSendAnalytics>();
 			SendAnalyticsOperation->SetEventName(FText::FromString("UE Feedback"));
