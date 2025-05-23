@@ -7,7 +7,6 @@
 // URL is a header only library, including it here separately to avoid duplicate definitions in the DLL
 THIRD_PARTY_INCLUDES_START
 #include <boost/url.hpp>
-#include <boost/url/src.hpp>
 #include <boost/url/encode.hpp>
 THIRD_PARTY_INCLUDES_END
 //

@@ -80,18 +80,11 @@ namespace DiversionUtils
 				FPackageName::GetAssetPackageExtension());
 
 			// Save the package with optional flags, using `SavePackage` from `UPackageTools`
-			bool bSuccess = UPackage::SavePackage(
-				Package, 
-				nullptr, 
-				RF_Standalone | RF_Public, 
-				*PackageFileName, 
-				GError, 
-				nullptr, 
-				false, 
-				true, 
-				SAVE_NoError
-			);
-
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			SaveArgs.SaveFlags = SAVE_NoError;
+			bool bSuccess = UPackage::SavePackage(Package, nullptr, *PackageFileName, SaveArgs);
+			
 			if (bSuccess)
 			{
 				UE_LOG(LogSourceControl, Log, TEXT("Package saved successfully: %s"), *PackageFileName);
